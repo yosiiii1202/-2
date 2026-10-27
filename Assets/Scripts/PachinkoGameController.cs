@@ -70,6 +70,14 @@ public sealed class PachinkoGameController : MonoBehaviour
     private int currentTab;
     private int purchaseAmount = 1;
     private string lastResult = "スペースキーまたは「玉を打つ」で発射";
+    private AudioSource soundSource;
+    private AudioSource jackpotSoundSource;
+    private AudioSource jackpotVoiceSource;
+    private AudioSource musicSource;
+    private AudioClip launchSound;
+    private AudioClip jackpotSound;
+    private AudioClip jackpotVoice;
+    private AudioClip backgroundMusic;
 
     private GUIStyle titleStyle;
     private GUIStyle eyebrowStyle;
@@ -90,6 +98,7 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void Start()
     {
+        InitializeAudio();
         EnsureCabinetVisuals();
         EnsureAquariumBackground();
         EnsureOuterAquariumBackground();
@@ -740,6 +749,7 @@ public sealed class PachinkoGameController : MonoBehaviour
 
         nextManualLaunch = Time.time + Mathf.Max(0.08f, 0.22f - reincarnationLaunchSpeedLevel * 0.015f);
         int count = 1 + launchCountLevel + transcendenceVolleyLevel * 2;
+        PlaySound(launchSound, 0.58f, Random.Range(0.96f, 1.04f));
 
         for (int i = 0; i < count; i++)
         {
@@ -866,6 +876,8 @@ public sealed class PachinkoGameController : MonoBehaviour
             int payout;
             if (jackpot)
             {
+                if (jackpotSoundSource != null && jackpotSound != null) jackpotSoundSource.PlayOneShot(jackpotSound, 0.62f);
+                if (jackpotVoiceSource != null && jackpotVoice != null) jackpotVoiceSource.PlayOneShot(jackpotVoice, 1f);
                 consecutiveWins++;
                 payout = Mathf.RoundToInt(80f * multiplier * (1f + Mathf.Min(consecutiveWins - 1, 10) * 0.25f));
                 if (alreadyInKakuhen) kakuhenBallsRemaining--;
@@ -904,6 +916,45 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
         isSpinning = false;
         lcdStoppedDigits = 0;
+    }
+
+    private void InitializeAudio()
+    {
+        soundSource = GetComponent<AudioSource>();
+        if (soundSource == null) soundSource = gameObject.AddComponent<AudioSource>();
+        soundSource.playOnAwake = false;
+        soundSource.spatialBlend = 0f;
+        soundSource.dopplerLevel = 0f;
+        jackpotSoundSource = gameObject.AddComponent<AudioSource>();
+        jackpotSoundSource.playOnAwake = false;
+        jackpotSoundSource.spatialBlend = 0f;
+        jackpotSoundSource.dopplerLevel = 0f;
+        jackpotVoiceSource = gameObject.AddComponent<AudioSource>();
+        jackpotVoiceSource.playOnAwake = false;
+        jackpotVoiceSource.spatialBlend = 0f;
+        jackpotVoiceSource.dopplerLevel = 0f;
+        musicSource = gameObject.AddComponent<AudioSource>();
+        musicSource.playOnAwake = false;
+        musicSource.loop = true;
+        musicSource.spatialBlend = 0f;
+        musicSource.dopplerLevel = 0f;
+        musicSource.volume = 0.28f;
+        launchSound = Resources.Load<AudioClip>("Audio/launch");
+        jackpotSound = Resources.Load<AudioClip>("Audio/jackpot");
+        jackpotVoice = Resources.Load<AudioClip>("Audio/jackpot_voice");
+        backgroundMusic = Resources.Load<AudioClip>("Audio/bgm");
+        if (backgroundMusic != null)
+        {
+            musicSource.clip = backgroundMusic;
+            musicSource.Play();
+        }
+    }
+
+    private void PlaySound(AudioClip clip, float volume, float pitch = 1f)
+    {
+        if (clip == null || soundSource == null) return;
+        soundSource.pitch = pitch;
+        soundSource.PlayOneShot(clip, volume);
     }
 
     public void LoseBall(PachinkoBall ball)
@@ -980,6 +1031,7 @@ public sealed class PachinkoGameController : MonoBehaviour
 
         DrawJackpotImpactFlash(boardWidth, screenHeight, elapsed);
         DrawJackpotStarburst(boardWidth, screenHeight, elapsed, remaining);
+        DrawPFlashFrame(boardWidth, screenHeight, elapsed);
         GUI.color = new Color(1f, 0.45f, 0.12f, 0.025f + 0.055f * pulse * remaining);
         GUI.DrawTexture(new Rect(0f, 0f, boardWidth, screenHeight), Texture2D.whiteTexture);
         for (int i = 0; i < 64; i++)
@@ -1028,6 +1080,26 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUI.Label(detailRect, $"{jackpotCelebrationMessage}　払い出し +¥{jackpotPayoutDisplay:N0}", detail);
         DrawCelebrationCharacter(new Rect(panel.xMax - 94f, panel.y + 7f, 82f, panel.height - 14f), pulse);
         DrawCharacterSpeechBubble(panel, remaining, pulse);
+        GUI.color = oldColor;
+    }
+
+    private void DrawPFlashFrame(float boardWidth, float screenHeight, float elapsed)
+    {
+        if (elapsed > 1.6f) return;
+        float pulse = Mathf.PingPong(elapsed * 8f, 1f);
+        float alpha = 0.35f + pulse * 0.55f;
+        float thickness = Mathf.Clamp(screenHeight * 0.014f, 10f, 22f);
+        float top = Mathf.Clamp(screenHeight * 0.085f + 8f, 60f, 98f);
+        float bottom = screenHeight - 74f;
+        Color oldColor = GUI.color;
+        GUI.color = new Color(0.1f, 1f, 0.48f, alpha);
+        GUI.DrawTexture(new Rect(3f, top, thickness, bottom - top), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(boardWidth - thickness - 3f, top, thickness, bottom - top), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(3f, top, boardWidth - 6f, thickness), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(3f, bottom - thickness, boardWidth - 6f, thickness), Texture2D.whiteTexture);
+        GUI.color = new Color(0.88f, 1f, 0.94f, alpha * 0.85f);
+        GUI.DrawTexture(new Rect(thickness + 4f, top + thickness, 3f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(boardWidth - thickness - 7f, top + thickness, 3f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
         GUI.color = oldColor;
     }
 

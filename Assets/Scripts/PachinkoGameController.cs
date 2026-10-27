@@ -5,6 +5,8 @@ using UnityEngine.InputSystem;
 
 public sealed class PachinkoGameController : MonoBehaviour
 {
+    private static Texture2D celebrationCircleTexture;
+    private static Texture2D aquariumBackdropTexture;
     private const long ReincarnationBaseRequirement = 250_000L;
     private const long ReincarnationRequirementMultiplier = 3L;
     [Header("Scene references")]
@@ -16,6 +18,11 @@ public sealed class PachinkoGameController : MonoBehaviour
     [SerializeField] private int autoLaunchInterval = 2;
 
     private readonly HashSet<PachinkoBall> activeBalls = new HashSet<PachinkoBall>();
+    private readonly List<Transform> aquariumFish = new List<Transform>();
+    private readonly List<Vector3> aquariumFishHomes = new List<Vector3>();
+    private readonly List<float> aquariumFishSpeeds = new List<float>();
+    private readonly List<Transform> aquariumFishTails = new List<Transform>();
+    private readonly Transform[] jackpotCharacterModels = new Transform[4];
     private readonly int[] lanePayouts = { 1, 2, 3, 8, 3, 2, 1 };
     private readonly string[] laneNames = { "入賞口", "チューリップ", "アタッカー", "ヘソ抽選", "アタッカー", "チューリップ", "入賞口" };
     private readonly int[] categoryLevels = new int[3];
@@ -34,10 +41,20 @@ public sealed class PachinkoGameController : MonoBehaviour
     private float nextAutoPurchase;
     private float nextManualLaunch;
     private int pendingBalls;
+    private readonly Queue<float> hesoSpinQueue = new Queue<float>();
     private int kakuhenBallsRemaining;
     private int consecutiveWins;
     private bool isSpinning;
-    private float spinEndsAt;
+    private int lcdStoppedDigits;
+    private float jackpotFlashUntil;
+    private int jackpotPayoutDisplay;
+    private string jackpotCelebrationMessage = "大当たり！";
+    private int celebrationCharacterIndex;
+    private float jackpotEffectStartedAt = -10f;
+    private float jackpotShakeUntil;
+    private Camera jackpotCamera;
+    private Vector3 jackpotCameraBasePosition;
+    private bool jackpotCameraShaking;
     private string lcdMessage = "保留を待っています";
     private readonly int[] lcdDigits = { 7, 7, 7 };
     private float nextLcdDigitAt;
@@ -74,6 +91,10 @@ public sealed class PachinkoGameController : MonoBehaviour
     private void Start()
     {
         EnsureCabinetVisuals();
+        EnsureAquariumBackground();
+        EnsureOuterAquariumBackground();
+        Ensure3DAquariumDecorations();
+        Ensure3DJackpotCharacters();
         EnsureShooterVisual();
         EnsureOuterWallColliders();
         EnsureHesoVisual();
@@ -95,7 +116,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         {
             MeshFilter existingFilter = existingPlayfield.GetComponent<MeshFilter>();
             if (existingFilter == null) existingFilter = existingPlayfield.gameObject.AddComponent<MeshFilter>();
-            if (existingFilter.sharedMesh == null) existingFilter.sharedMesh = CreatePlayfieldMesh(CabinetOutline());
+            existingFilter.sharedMesh = CreatePlayfieldMesh(CabinetOutline());
+            ApplyAquariumBackdrop(existingPlayfield.GetComponent<Renderer>());
 
             Material existingBrass = GetMaterial("Outer Brass Frame 0", new Color(0.9f, 0.56f, 0.18f));
             Material existingBlue = GetMaterial("Inner Blue Pin Guide 0", new Color(0.12f, 0.58f, 0.92f));
@@ -136,7 +158,11 @@ public sealed class PachinkoGameController : MonoBehaviour
         MeshFilter filter = backplate.GetComponent<MeshFilter>();
         if (filter == null) filter = backplate.gameObject.AddComponent<MeshFilter>();
         filter.sharedMesh = CreatePlayfieldMesh(outline);
-        if (backplateRenderer != null) backplateRenderer.sharedMaterial = backplateMaterial;
+        if (backplateRenderer != null)
+        {
+            backplateRenderer.sharedMaterial = backplateMaterial;
+            ApplyAquariumBackdrop(backplateRenderer);
+        }
         Collider plateCollider = backplate.GetComponent<Collider>();
         if (plateCollider != null) plateCollider.enabled = false;
 
@@ -314,11 +340,60 @@ public sealed class PachinkoGameController : MonoBehaviour
             triangles[i * 3 + 1] = i + 1;
             triangles[i * 3 + 2] = (i + 1) % outline.Length + 1;
         }
+        Vector2[] uv = new Vector2[vertices.Length];
+        for (int i = 0; i < vertices.Length; i++)
+            uv[i] = new Vector2(Mathf.InverseLerp(-3.72f, 3.72f, vertices[i].x), Mathf.InverseLerp(-4.9f, 4.9f, vertices[i].y));
         mesh.vertices = vertices;
+        mesh.uv = uv;
         mesh.triangles = triangles;
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
         return mesh;
+    }
+
+    private void ApplyAquariumBackdrop(Renderer playfieldRenderer)
+    {
+        if (playfieldRenderer == null) return;
+        EnsureAquariumBackdropTexture();
+        Material backdropMaterial = playfieldRenderer.material;
+        if (backdropMaterial.HasProperty("_BaseMap")) backdropMaterial.SetTexture("_BaseMap", aquariumBackdropTexture);
+        else if (backdropMaterial.HasProperty("_MainTex")) backdropMaterial.SetTexture("_MainTex", aquariumBackdropTexture);
+        if (backdropMaterial.HasProperty("_BaseColor")) backdropMaterial.SetColor("_BaseColor", Color.white);
+        else if (backdropMaterial.HasProperty("_Color")) backdropMaterial.SetColor("_Color", Color.white);
+        backdropMaterial.name = "Pixel Aquarium Water Backdrop";
+    }
+
+    private static void EnsureAquariumBackdropTexture()
+    {
+        if (aquariumBackdropTexture != null) return;
+        const int size = 128;
+        aquariumBackdropTexture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+        {
+            name = "Pixel Aquarium Water",
+            filterMode = FilterMode.Point,
+            wrapMode = TextureWrapMode.Clamp,
+            hideFlags = HideFlags.HideAndDontSave
+        };
+        Color[] pixels = new Color[size * size];
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+        {
+            float v = y / (float)(size - 1);
+            Color deep = new Color(0.018f, 0.11f, 0.23f);
+            Color mid = new Color(0.055f, 0.37f, 0.48f);
+            Color surface = new Color(0.025f, 0.19f, 0.34f);
+            Color baseColor = v < 0.55f
+                ? Color.Lerp(deep, mid, v / 0.55f)
+                : Color.Lerp(mid, surface, (v - 0.55f) / 0.45f);
+            float wave = Mathf.Sin(x * 0.16f + y * 0.11f) + Mathf.Sin(x * 0.07f - y * 0.19f) * 0.45f;
+            if (y < 34 && Mathf.Abs(wave - 0.8f) < 0.1f)
+                baseColor = Color.Lerp(baseColor, new Color(0.14f, 0.66f, 0.72f), 0.3f);
+            if (((x * 37 + y * 61) % 263) == 0)
+                baseColor = Color.Lerp(baseColor, new Color(0.52f, 0.87f, 0.91f), 0.34f);
+            pixels[y * size + x] = baseColor;
+        }
+        aquariumBackdropTexture.SetPixels(pixels);
+        aquariumBackdropTexture.Apply(false, true);
     }
 
     private void CreateCabinetContour(string prefix, Vector2[] points, float thickness, float z, Material material)
@@ -484,8 +559,6 @@ public sealed class PachinkoGameController : MonoBehaviour
                 LaunchBatch();
         }
 
-        if (isSpinning && Time.time >= spinEndsAt) isSpinning = false;
-
         if (autoLaunch && Time.time >= nextAutoLaunch)
         {
             nextAutoLaunch = Time.time + Mathf.Max(0.2f, autoLaunchInterval * 0.25f);
@@ -499,6 +572,163 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
 
         RemoveExpiredBalls();
+        AnimateAquariumFish();
+        AnimateJackpotCharacters();
+        AnimateJackpotCameraShake();
+    }
+
+    private void EnsureAquariumBackground()
+    {
+        Transform existing = transform.Find("3D Aquarium Fish 0");
+        if (existing != null) return;
+
+        Vector3[] homes =
+        {
+            new Vector3(-2.8f, 3.9f, 0.52f), new Vector3(-1.6f, 2.9f, 0.52f),
+            new Vector3(2.8f, 3.7f, 0.52f), new Vector3(3.05f, 1.4f, 0.52f),
+            new Vector3(-3.0f, 0.2f, 0.52f), new Vector3(2.7f, -1.8f, 0.52f),
+            new Vector3(-2.3f, -2.8f, 0.52f), new Vector3(1.8f, -3.8f, 0.52f),
+            new Vector3(-2.45f, 1.8f, 0.52f), new Vector3(2.45f, -0.4f, 0.52f),
+            new Vector3(2.15f, 2.4f, 0.52f), new Vector3(-2.65f, -1.8f, 0.52f),
+            new Vector3(-4.05f, 3.2f, 1.4f), new Vector3(4.05f, 1.2f, 1.4f),
+            new Vector3(-4.08f, -1.8f, 1.4f), new Vector3(4.08f, -3.4f, 1.4f)
+        };
+        Color[] fishColors = { new Color(1f, 0.57f, 0.24f), new Color(0.26f, 0.82f, 0.9f), new Color(1f, 0.48f, 0.68f), new Color(0.88f, 0.77f, 0.34f) };
+        Material[] fishBodyMaterials = new Material[fishColors.Length];
+        Material[] fishFinMaterials = new Material[fishColors.Length];
+        for (int i = 0; i < fishColors.Length; i++)
+        {
+            fishBodyMaterials[i] = CreateVisualMaterial("3D Aquarium Fish Body " + i, fishColors[i]);
+            fishFinMaterials[i] = CreateVisualMaterial("3D Aquarium Fish Fin " + i, Color.Lerp(fishColors[i], new Color(0.08f, 0.22f, 0.32f), 0.28f));
+        }
+        Material fishEyeMaterial = CreateVisualMaterial("3D Aquarium Fish Eye", new Color(0.025f, 0.045f, 0.08f));
+        for (int i = 0; i < homes.Length; i++)
+        {
+            GameObject fish = new GameObject("3D Aquarium Fish " + i);
+            fish.transform.SetParent(transform, false);
+            fish.transform.localPosition = homes[i];
+            float scale = i % 3 == 0 ? 0.72f : 0.58f;
+            fish.transform.localScale = Vector3.one * scale;
+            Material body = fishBodyMaterials[i % fishBodyMaterials.Length];
+            Material fin = fishFinMaterials[i % fishFinMaterials.Length];
+            CreateFishPart(fish.transform, "Body", PrimitiveType.Sphere, new Vector3(0f, 0f, 0f), new Vector3(0.72f, 0.4f, 0.3f), body);
+            Transform tail = CreateFishPart(fish.transform, "Tail", PrimitiveType.Sphere, new Vector3(-0.48f, 0f, 0f), new Vector3(0.32f, 0.52f, 0.12f), fin);
+            tail.localRotation = Quaternion.Euler(0f, 0f, 24f);
+            CreateFishPart(fish.transform, "Top Fin", PrimitiveType.Sphere, new Vector3(-0.04f, 0.2f, 0f), new Vector3(0.27f, 0.18f, 0.1f), fin).localRotation = Quaternion.Euler(0f, 0f, -22f);
+            CreateFishPart(fish.transform, "Lower Fin", PrimitiveType.Sphere, new Vector3(0.02f, -0.19f, 0f), new Vector3(0.22f, 0.15f, 0.1f), fin).localRotation = Quaternion.Euler(0f, 0f, 20f);
+            CreateFishPart(fish.transform, "Eye", PrimitiveType.Sphere, new Vector3(0.23f, 0.08f, -0.16f), new Vector3(0.075f, 0.075f, 0.04f), fishEyeMaterial);
+            aquariumFishTails.Add(tail);
+            aquariumFish.Add(fish.transform);
+            aquariumFishHomes.Add(homes[i]);
+            aquariumFishSpeeds.Add(0.22f + (i % 4) * 0.055f);
+        }
+    }
+
+    private Transform CreateFishPart(Transform parent, string partName, PrimitiveType type, Vector3 position, Vector3 scale, Material material)
+    {
+        GameObject part = GameObject.CreatePrimitive(type);
+        part.name = partName;
+        part.transform.SetParent(parent, false);
+        part.transform.localPosition = position;
+        part.transform.localScale = scale;
+        Collider collider = part.GetComponent<Collider>();
+        if (collider != null) collider.enabled = false;
+        Renderer renderer = part.GetComponent<Renderer>();
+        if (renderer != null) { renderer.sharedMaterial = material; renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; renderer.receiveShadows = false; }
+        return part.transform;
+    }
+
+    private void Ensure3DAquariumDecorations()
+    {
+        if (transform.Find("3D Aquarium Coral Left") != null) return;
+        Material coral = CreateVisualMaterial("Aquarium Coral", new Color(0.88f, 0.34f, 0.27f));
+        Material seaweed = CreateVisualMaterial("Aquarium Seaweed", new Color(0.1f, 0.58f, 0.42f));
+        Material bubble = CreateVisualMaterial("Aquarium Bubble", new Color(0.44f, 0.84f, 0.96f));
+        for (int side = -1; side <= 1; side += 2)
+        {
+            float x = side * 4.12f;
+            GameObject root = new GameObject(side < 0 ? "3D Aquarium Coral Left" : "3D Aquarium Coral Right");
+            root.transform.SetParent(transform, false);
+            root.transform.localPosition = new Vector3(x, -3.95f, 1.1f);
+            for (int stem = 0; stem < 3; stem++)
+            {
+                Transform branch = CreateFishPart(root.transform, "Coral Branch " + stem, PrimitiveType.Capsule,
+                    new Vector3((stem - 1) * 0.16f, 0.4f + stem * 0.08f, 0f), new Vector3(0.09f, 0.38f + stem * 0.06f, 0.09f), stem == 1 ? coral : seaweed);
+                branch.localRotation = Quaternion.Euler(0f, 0f, (stem - 1) * 24f);
+                CreateFishPart(root.transform, "Coral Tip " + stem, PrimitiveType.Sphere,
+                    new Vector3((stem - 1) * 0.26f, 0.83f + stem * 0.08f, 0f), new Vector3(0.16f, 0.15f, 0.1f), coral);
+            }
+        }
+        for (int i = 0; i < 7; i++)
+        {
+            GameObject bubbleObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            bubbleObject.name = "3D Aquarium Bubble " + i;
+            bubbleObject.transform.SetParent(transform, false);
+            bubbleObject.transform.localPosition = new Vector3(i % 2 == 0 ? -3.8f : 3.8f, -2.4f + i * 0.72f, 1.25f);
+            bubbleObject.transform.localScale = Vector3.one * (0.07f + (i % 3) * 0.025f);
+            Collider bubbleCollider = bubbleObject.GetComponent<Collider>();
+            if (bubbleCollider != null) bubbleCollider.enabled = false;
+            bubbleObject.GetComponent<Renderer>().sharedMaterial = bubble;
+        }
+    }
+
+    private void EnsureOuterAquariumBackground()
+    {
+        Camera camera = Camera.main;
+        if (camera == null) return;
+        camera.clearFlags = CameraClearFlags.SolidColor;
+        camera.backgroundColor = new Color(0.025f, 0.15f, 0.22f, 1f);
+        if (transform.Find("Pixel Aquarium Surrounding Water") != null) return;
+
+        EnsureAquariumBackdropTexture();
+        float viewHeight = camera.orthographic
+            ? camera.orthographicSize * 2f
+            : 2f * 18f * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        Rect viewport = camera.rect;
+        float viewAspect = Screen.height > 0f
+            ? Screen.width * viewport.width / (Screen.height * Mathf.Max(0.01f, viewport.height))
+            : camera.aspect;
+        float viewWidth = viewHeight * viewAspect;
+        float distanceToBoard = Vector3.Dot(transform.position - camera.transform.position, camera.transform.forward);
+        float backgroundDistance = distanceToBoard + 5f;
+
+        GameObject water = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        water.name = "Pixel Aquarium Surrounding Water";
+        water.transform.SetParent(transform, false);
+        water.transform.position = camera.transform.position + camera.transform.forward * backgroundDistance;
+        water.transform.rotation = Quaternion.LookRotation(camera.transform.forward, camera.transform.up);
+        water.transform.localScale = new Vector3(viewWidth * 1.12f, viewHeight * 1.12f, 1f);
+        Collider waterCollider = water.GetComponent<Collider>();
+        if (waterCollider != null) waterCollider.enabled = false;
+
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null) shader = Shader.Find("Unlit/Texture");
+        Material waterMaterial = shader != null
+            ? new Material(shader) { name = "Pixel Aquarium Surrounding Water Material" }
+            : CreateVisualMaterial("Pixel Aquarium Surrounding Water Material", Color.white);
+        if (waterMaterial.HasProperty("_BaseMap")) waterMaterial.SetTexture("_BaseMap", aquariumBackdropTexture);
+        else if (waterMaterial.HasProperty("_MainTex")) waterMaterial.SetTexture("_MainTex", aquariumBackdropTexture);
+        if (waterMaterial.HasProperty("_BaseColor")) waterMaterial.SetColor("_BaseColor", Color.white);
+        else if (waterMaterial.HasProperty("_Color")) waterMaterial.SetColor("_Color", Color.white);
+        if (waterMaterial.HasProperty("_Cull")) waterMaterial.SetInt("_Cull", 0);
+        water.GetComponent<Renderer>().sharedMaterial = waterMaterial;
+    }
+
+    private void AnimateAquariumFish()
+    {
+        for (int i = 0; i < aquariumFish.Count; i++)
+        {
+            Transform fish = aquariumFish[i];
+            if (fish == null) continue;
+            Vector3 home = aquariumFishHomes[i];
+            float direction = i % 2 == 0 ? 1f : -1f;
+            float swim = Mathf.Sin(Time.time * aquariumFishSpeeds[i] + i * 1.7f) * 0.72f;
+            Vector3 position = home + new Vector3(swim * direction, Mathf.Sin(Time.time * 1.3f + i) * 0.12f, 0f);
+            fish.localPosition = position;
+            fish.localScale = new Vector3(Mathf.Abs(fish.localScale.x) * direction, fish.localScale.y, 1f);
+            if (i < aquariumFishTails.Count && aquariumFishTails[i] != null)
+                aquariumFishTails[i].localRotation = Quaternion.Euler(0f, 0f, 20f + Mathf.Sin(Time.time * 7f + i) * 22f);
+        }
     }
 
     public void LaunchBatch()
@@ -509,7 +739,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
 
         nextManualLaunch = Time.time + Mathf.Max(0.08f, 0.22f - reincarnationLaunchSpeedLevel * 0.015f);
-        int count = 1 + launchCountLevel + transcendenceVolleyLevel * 5;
+        int count = 1 + launchCountLevel + transcendenceVolleyLevel * 2;
 
         for (int i = 0; i < count; i++)
         {
@@ -566,7 +796,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
 
         int category = laneIndex == 1 || laneIndex == 5 ? 1 : laneIndex == 2 || laneIndex == 4 ? 2 : 0;
-        float multiplier = (1f + ballValueLevel * 0.5f)
+        float multiplier = GetBallValueMultiplier()
             * (1f + categoryLevels[category] * 0.5f)
             * (1f + reincarnationUpgradeLevel * 0.15f)
             * Mathf.Pow(2f, transcendenceIncomeLevel);
@@ -577,7 +807,8 @@ public sealed class PachinkoGameController : MonoBehaviour
             {
                 pendingBalls++;
                 lcdMessage = "ヘソ入賞！ 保留 +1";
-                StartCoroutine(ResolveHesoSpin(multiplier));
+                hesoSpinQueue.Enqueue(multiplier);
+                if (!isSpinning) StartCoroutine(ResolveHesoSpins());
             }
             else
             {
@@ -600,47 +831,79 @@ public sealed class PachinkoGameController : MonoBehaviour
         Destroy(ball.gameObject, 0.05f);
     }
 
-    private IEnumerator ResolveHesoSpin(float multiplier)
+    private IEnumerator ResolveHesoSpins()
     {
         isSpinning = true;
-        spinEndsAt = Time.time + 0.9f;
-        nextLcdDigitAt = Time.time;
-        RollLcdDigits();
-        lcdMessage = "回転中…";
-        yield return new WaitForSeconds(0.9f);
-        pendingBalls = Mathf.Max(0, pendingBalls - 1);
+        while (hesoSpinQueue.Count > 0)
+        {
+            float multiplier = hesoSpinQueue.Dequeue();
+            bool alreadyInKakuhen = kakuhenBallsRemaining > 0;
+            bool jackpot = alreadyInKakuhen || Random.value < JackpotChance;
+            bool kakuhen = jackpot && (alreadyInKakuhen || Random.value < KakuhenChance);
+            int[] resultDigits = jackpot
+                ? new[] { 7, 7, 7 }
+                : new[] { Random.Range(1, 10), Random.Range(1, 10), Random.Range(1, 10) };
+            if (!jackpot && resultDigits[0] == resultDigits[1] && resultDigits[1] == resultDigits[2])
+                resultDigits[2] = resultDigits[2] % 9 + 1;
 
-        bool alreadyInKakuhen = kakuhenBallsRemaining > 0;
-        bool jackpot = alreadyInKakuhen || Random.value < JackpotChance;
-        int payout;
-        if (jackpot)
-        {
-            lcdDigits[0] = 7;
-            lcdDigits[1] = 7;
-            lcdDigits[2] = 7;
-            consecutiveWins++;
-            payout = Mathf.RoundToInt(80f * multiplier * (1f + Mathf.Min(consecutiveWins - 1, 10) * 0.25f));
-            if (alreadyInKakuhen) kakuhenBallsRemaining--;
-            bool kakuhen = alreadyInKakuhen || Random.value < KakuhenChance;
-            if (kakuhen && !alreadyInKakuhen) kakuhenBallsRemaining = 8;
-            lcdMessage = kakuhen ? "777　大当たり！　確変突入" : "777　大当たり！";
-            lastResult = kakuhen ? $"大当たり！確変突入　+¥{payout:N0}" : $"大当たり！　+¥{payout:N0}";
-        }
-        else
-        {
+            lcdStoppedDigits = 0;
+            nextLcdDigitAt = Time.time;
             RollLcdDigits();
-            if (lcdDigits[0] == lcdDigits[1] && lcdDigits[1] == lcdDigits[2])
-                lcdDigits[2] = lcdDigits[2] % 9 + 1;
-            payout = Mathf.Max(0, Mathf.RoundToInt(2f * multiplier));
-            consecutiveWins = 0;
-            lcdMessage = "リーチ…　残念！";
-            lastResult = "ヘソ抽選　ハズレ";
-        }
+            lcdMessage = "抽選中…";
+            yield return new WaitForSeconds(1.15f);
 
-        money += payout;
-        lifetimePayout += payout;
-        runPayout += payout;
-        isSpinning = pendingBalls > 0;
+            lcdStoppedDigits = 1;
+            lcdDigits[0] = resultDigits[0];
+            lcdMessage = resultDigits[0] == resultDigits[1] ? "リーチ！" : "数字停止…";
+            yield return new WaitForSeconds(0.35f);
+            lcdStoppedDigits = 2;
+            lcdDigits[1] = resultDigits[1];
+            lcdMessage = resultDigits[0] == resultDigits[1] ? "最後の数字に注目！" : "数字停止…";
+            yield return new WaitForSeconds(0.4f);
+            lcdStoppedDigits = 3;
+            lcdDigits[2] = resultDigits[2];
+
+            int payout;
+            if (jackpot)
+            {
+                consecutiveWins++;
+                payout = Mathf.RoundToInt(80f * multiplier * (1f + Mathf.Min(consecutiveWins - 1, 10) * 0.25f));
+                if (alreadyInKakuhen) kakuhenBallsRemaining--;
+                if (kakuhen && !alreadyInKakuhen) kakuhenBallsRemaining = 8;
+                lcdMessage = kakuhen ? "777　大当たり！　確変突入" : "777　大当たり！";
+                lastResult = kakuhen ? $"大当たり！確変突入　+¥{payout:N0}" : $"大当たり！　+¥{payout:N0}";
+                jackpotPayoutDisplay = payout;
+                jackpotCelebrationMessage = kakuhen ? "確変突入！" : "大当たり！";
+                celebrationCharacterIndex = Random.Range(0, 4);
+                jackpotFlashUntil = Time.time + 4.5f;
+                jackpotEffectStartedAt = Time.time;
+                jackpotShakeUntil = Time.time + 0.75f;
+                if (!jackpotCameraShaking)
+                {
+                    jackpotCamera = Camera.main;
+                    if (jackpotCamera != null)
+                    {
+                        jackpotCameraBasePosition = jackpotCamera.transform.position;
+                        jackpotCameraShaking = true;
+                    }
+                }
+            }
+            else
+            {
+                payout = Mathf.Max(0, Mathf.RoundToInt(2f * multiplier));
+                consecutiveWins = 0;
+                lcdMessage = resultDigits[0] == resultDigits[1] ? "リーチ…　残念！" : "ハズレ";
+                lastResult = "ヘソ抽選　ハズレ";
+            }
+
+            money += payout;
+            lifetimePayout += payout;
+            runPayout += payout;
+            pendingBalls = Mathf.Max(0, pendingBalls - 1);
+            yield return new WaitForSeconds(0.35f);
+        }
+        isSpinning = false;
+        lcdStoppedDigits = 0;
     }
 
     public void LoseBall(PachinkoBall ball)
@@ -705,13 +968,285 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUI.Label(new Rect(boardWidth * 0.32f, h * 0.59f, boardWidth * 0.36f, 30f), "▼　ヘソ　保留 +1　▼", hesoLabelStyle);
         DrawBoardControls(new Rect(12f, h - 72f, boardWidth - 24f, 58f));
         DrawSidePanel(new Rect(boardWidth + 8f, top + 8f, w - boardWidth - 20f, h - top - 18f));
+        if (Time.time < jackpotFlashUntil) DrawJackpotCelebration(boardWidth, h);
+    }
+
+    private void DrawJackpotCelebration(float boardWidth, float screenHeight)
+    {
+        float remaining = Mathf.Clamp01((jackpotFlashUntil - Time.time) / 4.5f);
+        float elapsed = Mathf.Max(0f, Time.time - jackpotEffectStartedAt);
+        float pulse = 0.82f + Mathf.PingPong(Time.time * 6f, 0.34f);
+        Color oldColor = GUI.color;
+
+        DrawJackpotImpactFlash(boardWidth, screenHeight, elapsed);
+        DrawJackpotStarburst(boardWidth, screenHeight, elapsed, remaining);
+        GUI.color = new Color(1f, 0.45f, 0.12f, 0.025f + 0.055f * pulse * remaining);
+        GUI.DrawTexture(new Rect(0f, 0f, boardWidth, screenHeight), Texture2D.whiteTexture);
+        for (int i = 0; i < 64; i++)
+        {
+            float fall = Mathf.Repeat(Time.time * (0.38f + (i % 5) * 0.025f) + i * 0.037f, 1f);
+            float x = Mathf.Repeat(i * 0.173f + Mathf.Sin(Time.time * 2.2f + i) * 0.06f, 1f) * boardWidth;
+            float y = Mathf.Repeat(fall + Mathf.Sin(Time.time * 2f + i * 0.8f) * 0.035f, 1f) * screenHeight;
+            float size = 8f + (i % 5) * 2.5f;
+            float angle = Mathf.Sin(Time.time * 3.2f + i * 1.7f) * 70f;
+            GUIUtility.RotateAroundPivot(angle, new Vector2(x, y));
+            GUI.color = i % 4 == 0 ? new Color(1f, 0.76f, 0.2f, remaining) : i % 3 == 0 ? new Color(1f, 0.42f, 0.69f, remaining) : new Color(1f, 0.84f, 0.9f, remaining);
+            GUI.DrawTexture(new Rect(x - size * 0.5f, y - size, size, size * 1.8f), GetCelebrationCircle());
+            GUIUtility.RotateAroundPivot(-angle, new Vector2(x, y));
+        }
+
+        float panelWidth = Mathf.Min(boardWidth * 0.94f, 760f);
+        float panelHeight = 166f;
+        Rect panel = new Rect((boardWidth - panelWidth) * 0.5f,
+            Mathf.Clamp(screenHeight * 0.34f, 100f, screenHeight - panelHeight - 80f), panelWidth, panelHeight);
+        GUI.color = new Color(1f, 0.34f + Mathf.PingPong(Time.time * 3.8f, 0.48f), 0.04f, 0.99f * remaining);
+        GUI.DrawTexture(panel, Texture2D.whiteTexture);
+        GUI.color = new Color(0.025f, 0.045f, 0.12f, 0.98f * remaining);
+        GUI.DrawTexture(new Rect(panel.x + 5f, panel.y + 5f, panel.width - 10f, panel.height - 10f), Texture2D.whiteTexture);
+
+        GUIStyle title = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt((panel.width - 132f) / 5.35f * pulse), 42, 86),
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter,
+            wordWrap = false,
+            normal = { textColor = new Color(1f, 0.88f, 0.2f, remaining) }
+        };
+        GUIStyle detail = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(panelHeight * 0.2f), 18, 32),
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter,
+            normal = { textColor = new Color(0.72f, 0.91f, 1f, remaining) }
+        };
+        Rect titleRect = new Rect(panel.x + 12f, panel.y + 12f, panel.width - 126f, panel.height * 0.57f);
+        GUI.color = Color.white;
+        DrawOutlinedCelebrationLabel(titleRect, "大当たり!!", title, new Color(0.82f, 0.12f, 0.2f, remaining), 3f);
+        Rect detailRect = new Rect(panel.x + 16f, panel.y + panel.height * 0.61f, panel.width - 138f, panel.height * 0.27f);
+        GUI.Label(new Rect(detailRect.x + 2f, detailRect.y + 2f, detailRect.width, detailRect.height),
+            $"{jackpotCelebrationMessage}　払い出し +¥{jackpotPayoutDisplay:N0}", detail);
+        GUI.Label(detailRect, $"{jackpotCelebrationMessage}　払い出し +¥{jackpotPayoutDisplay:N0}", detail);
+        DrawCelebrationCharacter(new Rect(panel.xMax - 94f, panel.y + 7f, 82f, panel.height - 14f), pulse);
+        DrawCharacterSpeechBubble(panel, remaining, pulse);
+        GUI.color = oldColor;
+    }
+
+    private void DrawOutlinedCelebrationLabel(Rect rect, string text, GUIStyle style, Color outline, float thickness)
+    {
+        GUIStyle shadow = new GUIStyle(style);
+        shadow.normal.textColor = outline;
+        GUI.Label(new Rect(rect.x - thickness, rect.y, rect.width, rect.height), text, shadow);
+        GUI.Label(new Rect(rect.x + thickness, rect.y, rect.width, rect.height), text, shadow);
+        GUI.Label(new Rect(rect.x, rect.y - thickness, rect.width, rect.height), text, shadow);
+        GUI.Label(new Rect(rect.x, rect.y + thickness, rect.width, rect.height), text, shadow);
+        GUI.Label(rect, text, style);
+    }
+
+    private void DrawCharacterSpeechBubble(Rect panel, float remaining, float pulse)
+    {
+        float width = Mathf.Min(panel.width * 0.78f, 460f);
+        const float height = 54f;
+        Rect bubble = new Rect(panel.x + (panel.width - width) * 0.5f, panel.y - height - 12f, width, height);
+        GUI.color = new Color(1f, 0.62f, 0.06f, 0.98f * remaining);
+        GUI.DrawTexture(new Rect(bubble.x - 3f, bubble.y - 3f, bubble.width + 6f, bubble.height + 6f), Texture2D.whiteTexture);
+        Vector2 tailPivot = new Vector2(bubble.xMax - 27f, bubble.yMax - 2f);
+        GUIUtility.RotateAroundPivot(45f, tailPivot);
+        GUI.DrawTexture(new Rect(tailPivot.x - 11f, tailPivot.y - 11f, 22f, 22f), Texture2D.whiteTexture);
+        GUIUtility.RotateAroundPivot(-45f, tailPivot);
+        GUI.color = new Color(1f, 1f, 0.94f, 0.99f * remaining);
+        GUI.DrawTexture(bubble, Texture2D.whiteTexture);
+        GUIUtility.RotateAroundPivot(45f, tailPivot);
+        GUI.DrawTexture(new Rect(tailPivot.x - 8f, tailPivot.y - 8f, 16f, 16f), Texture2D.whiteTexture);
+        GUIUtility.RotateAroundPivot(-45f, tailPivot);
+        GUIStyle speech = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(25f * pulse), 22, 34),
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter,
+            wordWrap = false,
+            normal = { textColor = new Color(0.72f, 0.04f, 0.18f, remaining) }
+        };
+        GUI.color = Color.white;
+        const string fullSpeech = "きたぁー！大当たりーっ！！";
+        int shown = Mathf.Clamp(Mathf.FloorToInt((Time.time - jackpotEffectStartedAt) * 18f) + 1, 1, fullSpeech.Length);
+        DrawOutlinedCelebrationLabel(new Rect(bubble.x + 5f, bubble.y + 2f, bubble.width - 10f, bubble.height - 4f),
+            fullSpeech.Substring(0, shown), speech, new Color(1f, 0.74f, 0.15f, remaining), 1.5f);
+    }
+
+    private void DrawJackpotImpactFlash(float boardWidth, float screenHeight, float elapsed)
+    {
+        if (elapsed > 0.95f) return;
+        float wave = Mathf.Max(0f, Mathf.Sin((elapsed + 0.04f) * 11f));
+        float envelope = 1f - elapsed / 0.95f;
+        float alpha = Mathf.Pow(wave, 2.2f) * envelope * 0.48f;
+        if (alpha <= 0.01f) return;
+        GUI.color = elapsed < 0.2f ? new Color(1f, 1f, 1f, alpha) : new Color(1f, 0.72f, 0.16f, alpha * 0.82f);
+        GUI.DrawTexture(new Rect(0f, 0f, boardWidth, screenHeight), Texture2D.whiteTexture);
+    }
+
+    private void DrawJackpotStarburst(float boardWidth, float screenHeight, float elapsed, float remaining)
+    {
+        float burst = Mathf.Clamp01(1f - elapsed / 1.2f);
+        if (burst <= 0f) return;
+        Vector2 center = new Vector2(boardWidth * 0.5f, screenHeight * 0.43f);
+        float rotation = Time.time * 28f;
+        for (int i = 0; i < 20; i++)
+        {
+            float angle = i * 18f + rotation;
+            float length = (38f + Mathf.PingPong(Time.time * 110f + i * 13f, 76f)) * burst;
+            float width = (3f + (i % 3)) * burst;
+            GUIUtility.RotateAroundPivot(angle, center);
+            GUI.color = i % 3 == 0 ? new Color(1f, 0.38f, 0.62f, burst * remaining) : new Color(1f, 0.83f, 0.24f, burst * remaining);
+            GUI.DrawTexture(new Rect(center.x - width * 0.5f, center.y - 118f - length, width, length), Texture2D.whiteTexture);
+            GUIUtility.RotateAroundPivot(-angle, center);
+        }
+    }
+
+    private void AnimateJackpotCameraShake()
+    {
+        if (!jackpotCameraShaking || jackpotCamera == null) return;
+        if (Time.time < jackpotShakeUntil)
+        {
+            float strength = (jackpotShakeUntil - Time.time) * 0.13f;
+            Vector3 offset = new Vector3(Mathf.Sin(Time.time * 72f) * strength, Mathf.Cos(Time.time * 61f) * strength, 0f);
+            jackpotCamera.transform.position = jackpotCameraBasePosition + offset;
+        }
+        else
+        {
+            jackpotCamera.transform.position = jackpotCameraBasePosition;
+            jackpotCameraShaking = false;
+            jackpotCamera = null;
+        }
+    }
+
+    private void DrawCelebrationCharacter(Rect rect, float pulse)
+    {
+        PositionJackpotCharacter(rect, pulse);
+    }
+
+    private void Ensure3DJackpotCharacters()
+    {
+        if (transform.Find("3D Jackpot Character 0") != null) return;
+        Color[] hairColors = { new Color(0.18f, 0.11f, 0.16f), new Color(0.88f, 0.57f, 0.22f), new Color(0.34f, 0.16f, 0.24f), new Color(0.12f, 0.31f, 0.4f) };
+        Color[] outfitColors = { new Color(0.84f, 0.23f, 0.34f), new Color(0.18f, 0.52f, 0.82f), new Color(0.78f, 0.36f, 0.68f), new Color(0.24f, 0.66f, 0.5f) };
+        Color[] accentColors = { new Color(1f, 0.82f, 0.35f), new Color(0.97f, 0.83f, 0.45f), new Color(1f, 0.65f, 0.78f), new Color(0.78f, 0.94f, 0.64f) };
+        Material skin = CreateVisualMaterial("Jackpot Character Skin", new Color(1f, 0.76f, 0.61f));
+        Material eye = CreateVisualMaterial("Jackpot Character Eyes", new Color(0.11f, 0.09f, 0.14f));
+        for (int i = 0; i < jackpotCharacterModels.Length; i++)
+        {
+            Transform root = new GameObject("3D Jackpot Character " + i).transform;
+            root.SetParent(transform, false);
+            jackpotCharacterModels[i] = root;
+            root.gameObject.SetActive(false);
+            Material hair = CreateVisualMaterial("Jackpot Character Hair " + i, hairColors[i]);
+            Material clothes = CreateVisualMaterial("Jackpot Character Outfit " + i, outfitColors[i]);
+            Material accent = CreateVisualMaterial("Jackpot Character Accent " + i, accentColors[i]);
+            CreateCharacterPart(root, "Body", PrimitiveType.Capsule, new Vector3(0f, -0.13f, 0f), new Vector3(0.48f, 0.42f, 0.3f), clothes);
+            CreateCharacterPart(root, "Collar", PrimitiveType.Sphere, new Vector3(0f, 0.13f, -0.015f), new Vector3(0.42f, 0.14f, 0.31f), accent);
+            CreateCharacterPart(root, "Skirt", PrimitiveType.Cylinder, new Vector3(0f, -0.42f, 0f), new Vector3(0.56f, 0.19f, 0.35f), clothes);
+            CreateCharacterPart(root, "Left Leg", PrimitiveType.Capsule, new Vector3(-0.15f, -0.72f, 0f), new Vector3(0.14f, 0.34f, 0.14f), skin);
+            CreateCharacterPart(root, "Right Leg", PrimitiveType.Capsule, new Vector3(0.15f, -0.72f, 0f), new Vector3(0.14f, 0.34f, 0.14f), skin);
+            CreateCharacterPart(root, "Left Shoe", PrimitiveType.Sphere, new Vector3(-0.16f, -1.01f, -0.06f), new Vector3(0.25f, 0.12f, 0.3f), hair);
+            CreateCharacterPart(root, "Right Shoe", PrimitiveType.Sphere, new Vector3(0.16f, -1.01f, -0.06f), new Vector3(0.25f, 0.12f, 0.3f), hair);
+            Transform leftArm = CreateCharacterPart(root, "Left Arm", PrimitiveType.Capsule, new Vector3(-0.35f, -0.06f, 0f), new Vector3(0.13f, 0.33f, 0.14f), clothes);
+            leftArm.localRotation = Quaternion.Euler(0f, 0f, 32f);
+            Transform rightArm = CreateCharacterPart(root, "Right Arm", PrimitiveType.Capsule, new Vector3(0.35f, -0.06f, 0f), new Vector3(0.13f, 0.33f, 0.14f), clothes);
+            rightArm.localRotation = Quaternion.Euler(0f, 0f, -32f);
+            CreateCharacterPart(root, "Left Hand", PrimitiveType.Sphere, new Vector3(-0.48f, 0.18f, -0.02f), new Vector3(0.16f, 0.16f, 0.15f), skin);
+            CreateCharacterPart(root, "Right Hand", PrimitiveType.Sphere, new Vector3(0.48f, 0.18f, -0.02f), new Vector3(0.16f, 0.16f, 0.15f), skin);
+            CreateCharacterPart(root, "Neck", PrimitiveType.Cylinder, new Vector3(0f, 0.27f, 0f), new Vector3(0.13f, 0.13f, 0.13f), skin);
+            CreateCharacterPart(root, "Head", PrimitiveType.Sphere, new Vector3(0f, 0.58f, 0f), new Vector3(0.62f, 0.68f, 0.46f), skin);
+            CreateCharacterPart(root, "Hair Cap", PrimitiveType.Sphere, new Vector3(0f, 0.82f, 0.025f), new Vector3(0.67f, 0.48f, 0.5f), hair);
+            CreateCharacterPart(root, "Hair Left", PrimitiveType.Capsule, new Vector3(-0.29f, 0.54f, 0.02f), new Vector3(0.18f, 0.48f, 0.2f), hair);
+            CreateCharacterPart(root, "Hair Right", PrimitiveType.Capsule, new Vector3(0.29f, 0.54f, 0.02f), new Vector3(0.18f, 0.48f, 0.2f), hair);
+            CreateCharacterPart(root, "Left Eye", PrimitiveType.Sphere, new Vector3(-0.16f, 0.59f, -0.222f), new Vector3(0.07f, 0.1f, 0.045f), eye);
+            CreateCharacterPart(root, "Right Eye", PrimitiveType.Sphere, new Vector3(0.16f, 0.59f, -0.222f), new Vector3(0.07f, 0.1f, 0.045f), eye);
+            CreateCharacterPart(root, "Hair Ornament", PrimitiveType.Sphere, new Vector3(0.33f, 0.91f, -0.13f), new Vector3(0.2f, 0.18f, 0.12f), accent);
+            if (i == 1 || i == 2)
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    Transform ponytail = CreateCharacterPart(root, "Ponytail " + side, PrimitiveType.Sphere, new Vector3(side * 0.48f, 0.48f, 0.1f), new Vector3(0.2f, 0.44f, 0.18f), hair);
+                    ponytail.localRotation = Quaternion.Euler(0f, 0f, side * -18f);
+                    CreateCharacterPart(root, "Ribbon " + side, PrimitiveType.Sphere, new Vector3(side * 0.44f, 0.72f, -0.04f), new Vector3(0.24f, 0.12f, 0.1f), accent);
+                }
+            if (i == 3)
+                CreateCharacterPart(root, "Side Ponytail", PrimitiveType.Sphere, new Vector3(0.45f, 0.35f, 0.12f), new Vector3(0.22f, 0.42f, 0.18f), hair);
+        }
+    }
+
+    private Transform CreateCharacterPart(Transform parent, string partName, PrimitiveType type, Vector3 position, Vector3 scale, Material material)
+    {
+        GameObject part = GameObject.CreatePrimitive(type);
+        part.name = partName;
+        part.transform.SetParent(parent, false);
+        part.transform.localPosition = position;
+        part.transform.localScale = scale;
+        Collider collider = part.GetComponent<Collider>();
+        if (collider != null) collider.enabled = false;
+        Renderer renderer = part.GetComponent<Renderer>();
+        if (renderer != null) { renderer.sharedMaterial = material; renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; renderer.receiveShadows = false; }
+        return part.transform;
+    }
+
+    private void PositionJackpotCharacter(Rect rect, float pulse)
+    {
+        Camera camera = Camera.main;
+        if (camera == null || jackpotCharacterModels[0] == null) return;
+        bool visible = Time.time < jackpotFlashUntil;
+        for (int i = 0; i < jackpotCharacterModels.Length; i++)
+            if (jackpotCharacterModels[i] != null) jackpotCharacterModels[i].gameObject.SetActive(visible && i == celebrationCharacterIndex);
+        if (!visible) return;
+        Transform character = jackpotCharacterModels[Mathf.Clamp(celebrationCharacterIndex, 0, jackpotCharacterModels.Length - 1)];
+        float screenX = rect.center.x;
+        float screenY = Screen.height - rect.center.y + Mathf.Sin(Time.time * 7f) * 4f;
+        float depth = Mathf.Max(0.2f, Vector3.Dot(transform.position - camera.transform.position, camera.transform.forward) - 0.25f);
+        character.position = camera.ScreenToWorldPoint(new Vector3(screenX, screenY, depth));
+        character.rotation = Quaternion.LookRotation(camera.transform.forward, camera.transform.up);
+        float pixelsToWorld = camera.orthographic ? camera.orthographicSize * 2f / Mathf.Max(1f, Screen.height) : (2f * depth * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad)) / Mathf.Max(1f, Screen.height);
+        character.localScale = Vector3.one * (rect.height * pixelsToWorld * (0.95f + (pulse - 0.82f) * 0.12f) / 2.05f);
+    }
+
+    private void AnimateJackpotCharacters()
+    {
+        if (Time.time < jackpotFlashUntil) return;
+        for (int i = 0; i < jackpotCharacterModels.Length; i++)
+            if (jackpotCharacterModels[i] != null && jackpotCharacterModels[i].gameObject.activeSelf)
+                jackpotCharacterModels[i].gameObject.SetActive(false);
+    }
+
+    private static Texture2D GetCelebrationCircle()
+    {
+        if (celebrationCircleTexture != null) return celebrationCircleTexture;
+        const int size = 48;
+        celebrationCircleTexture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+        {
+            name = "Celebration Circle",
+            filterMode = FilterMode.Bilinear,
+            hideFlags = HideFlags.HideAndDontSave
+        };
+        Color[] pixels = new Color[size * size];
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+        {
+            float dx = (x + 0.5f - size * 0.5f) / (size * 0.5f);
+            float dy = (y + 0.5f - size * 0.5f) / (size * 0.5f);
+            float alpha = Mathf.Clamp01((1f - Mathf.Sqrt(dx * dx + dy * dy)) * size * 0.5f);
+            pixels[y * size + x] = new Color(1f, 1f, 1f, alpha);
+        }
+        celebrationCircleTexture.SetPixels(pixels);
+        celebrationCircleTexture.Apply(false, true);
+        return celebrationCircleTexture;
     }
 
     private void DrawLCD(Rect rect)
     {
         rect = Rect.MinMaxRect(rect.xMin + 2f, rect.yMin + 2f, rect.xMax - 2f, rect.yMax - 2f);
         Color oldColor = GUI.color;
-        GUI.color = isSpinning ? new Color(0.12f, 0.28f, 0.68f, 0.97f) : new Color(0.035f, 0.08f, 0.22f, 0.94f);
+        bool jackpotFlash = Time.time < jackpotFlashUntil;
+        float flashPulse = jackpotFlash ? 0.72f + Mathf.PingPong(Time.time * 4f, 0.28f) : 1f;
+        GUI.color = jackpotFlash
+            ? new Color(0.08f, 0.48f * flashPulse, 0.62f * flashPulse, 0.98f)
+            : isSpinning ? new Color(0.12f, 0.28f, 0.68f, 0.97f) : new Color(0.035f, 0.08f, 0.22f, 0.94f);
         GUI.Box(rect, GUIContent.none, panelStyle);
         GUI.color = oldColor;
         string state = kakuhenBallsRemaining > 0 ? $"確変中　連チャン {consecutiveWins}" : "液晶抽選";
@@ -726,7 +1261,7 @@ public sealed class PachinkoGameController : MonoBehaviour
             fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.58f), 12, 42),
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
-            normal = { textColor = isSpinning ? new Color(0.65f, 0.9f, 1f) : new Color(1f, 0.82f, 0.28f) }
+            normal = { textColor = jackpotFlash ? new Color(1f, 0.9f, 0.35f) : isSpinning ? new Color(0.65f, 0.9f, 1f) : new Color(1f, 0.82f, 0.28f) }
         };
         for (int i = 0; i < lcdDigits.Length; i++)
         {
@@ -748,7 +1283,7 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void RollLcdDigits()
     {
-        for (int i = 0; i < lcdDigits.Length; i++) lcdDigits[i] = Random.Range(1, 10);
+        for (int i = lcdStoppedDigits; i < lcdDigits.Length; i++) lcdDigits[i] = Random.Range(1, 10);
     }
 
     private Rect GetLCDScreenRect(float boardWidth, float screenHeight)
@@ -851,9 +1386,9 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void DrawUpgradeTab()
     {
-        DrawUpgrade("玉の価値", ballValueLevel, 10, () => ballValueLevel++, "1玉あたりの獲得金額を増やす", $"×{1f + ballValueLevel * 0.5f:0.0} → ×{1f + (ballValueLevel + 1) * 0.5f:0.0}");
+        DrawUpgrade("玉の価値", ballValueLevel, 5, () => ballValueLevel++, "1玉あたりの獲得金額を増やす", $"×{GetBallValueMultiplier():0.0} → ×{1f + (ballValueLevel + 1) * 1f:0.0}", costMultiplier: 1.2f);
         DrawUpgrade("オート発射速度", 2 - autoLaunchInterval, 12, () => autoLaunchInterval = Mathf.Max(1, autoLaunchInterval - 1), autoLaunch ? "自動発射中" : "発射間隔を短縮", autoLaunchInterval > 1 ? $"{autoLaunchInterval}秒 → {autoLaunchInterval - 1}秒" : "最大強化");
-        DrawUpgrade("連射", launchCountLevel, 18, () => launchCountLevel++, "1回の発射で出る玉の数", $"{1 + launchCountLevel} → {2 + launchCountLevel}発");
+        DrawUpgrade("連射", launchCountLevel, 18, () => launchCountLevel++, "1回の発射で出る玉の数", $"{1 + launchCountLevel} → {2 + launchCountLevel}発", maxLevel: 5);
         DrawUpgrade("入賞口強化", categoryLevels[0], 16, () => categoryLevels[0]++, "入賞口の倍率", $"×{1f + categoryLevels[0] * 0.5f:0.0} → ×{1f + (categoryLevels[0] + 1) * 0.5f:0.0}");
         DrawUpgrade("チューリップ強化", categoryLevels[1], 16, () => categoryLevels[1]++, "チューリップの倍率", $"×{1f + categoryLevels[1] * 0.5f:0.0} → ×{1f + (categoryLevels[1] + 1) * 0.5f:0.0}");
         DrawUpgrade("ヘソ拡張", launchPowerLevel, 12, () => launchPowerLevel++, "発射パワーを上げて盤面へ届ける", $"Lv.{launchPowerLevel} → Lv.{launchPowerLevel + 1}");
@@ -926,8 +1461,8 @@ public sealed class PachinkoGameController : MonoBehaviour
             transcendencePoints--;
         }
 
-        GUI.enabled = transcendenceVolleyLevel < 10 && transcendencePoints >= 1;
-        if (GUILayout.Button($"一度に発射する玉 +5　Lv.{transcendenceVolleyLevel}/10　（1超越P）", buttonStyle, GUILayout.Height(40f)))
+        GUI.enabled = transcendenceVolleyLevel < 3 && transcendencePoints >= 1;
+        if (GUILayout.Button($"一度に発射する玉 +2　Lv.{transcendenceVolleyLevel}/3　（1超越P）", buttonStyle, GUILayout.Height(40f)))
         {
             transcendenceVolleyLevel++;
             transcendencePoints--;
@@ -940,7 +1475,7 @@ public sealed class PachinkoGameController : MonoBehaviour
             transcendencePoints--;
         }
         GUI.enabled = true;
-        GUILayout.Label($"超越効果：獲得金額 ×{Mathf.Pow(2f, transcendenceIncomeLevel):0} ／ 1回 {1 + launchCountLevel + transcendenceVolleyLevel * 5}発 ／ 大当たり {JackpotChance:P0}", bodyStyle);
+        GUILayout.Label($"超越効果：獲得金額 ×{Mathf.Pow(2f, transcendenceIncomeLevel):0} ／ 1回 {1 + launchCountLevel + transcendenceVolleyLevel * 2}発 ／ 大当たり {JackpotChance:P0}", bodyStyle);
     }
 
     private void DrawRecordTab()
@@ -952,20 +1487,28 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUILayout.Label($"大当たり確率　{JackpotChance:P0}\n確変突入率　{KakuhenChance:P0}", bodyStyle);
     }
 
-    private void DrawUpgrade(string label, int level, int baseCost, System.Action purchase, string description, string change)
+    private void DrawUpgrade(string label, int level, int baseCost, System.Action purchase, string description, string change, int maxLevel = -1, float costMultiplier = 1.32f)
     {
-        int count = purchaseAmount;
+        int availableLevels = maxLevel >= 0 ? Mathf.Max(0, maxLevel - level) : int.MaxValue;
+        int count = Mathf.Min(purchaseAmount, availableLevels);
         bool capped = (label == "オート発射速度" && autoLaunchInterval <= 1)
             || (label == "大当たり確率" && jackpotLevel >= 22)
-            || (label == "確変突入率" && probabilityChangeLevel >= 14);
+            || (label == "確変突入率" && probabilityChangeLevel >= 14)
+            || (maxLevel >= 0 && level >= maxLevel);
+        long CostAtLevel(int targetLevel)
+        {
+            if (costMultiplier == 1.32f) return UpgradeCost(baseCost, targetLevel);
+            double costAtLevel = baseCost * System.Math.Pow(costMultiplier, System.Math.Max(0, targetLevel));
+            return costAtLevel >= long.MaxValue ? long.MaxValue : System.Math.Max(1L, (long)System.Math.Round(costAtLevel));
+        }
         long cost = 0;
-        for (int i = 0; i < count; i++) cost += UpgradeCost(baseCost, level + i);
+        for (int i = 0; i < count; i++) cost += CostAtLevel(level + i);
         if (purchaseAmount == 100)
         {
             count = 0;
             cost = 0;
-            while (count < 100 && cost + UpgradeCost(baseCost, level + count) <= money)
-                cost += UpgradeCost(baseCost, level + count++);
+            while (count < availableLevels && count < 100 && cost + CostAtLevel(level + count) <= money)
+                cost += CostAtLevel(level + count++);
         }
         if (capped)
         {
@@ -1030,8 +1573,9 @@ public sealed class PachinkoGameController : MonoBehaviour
         long bestCost = long.MaxValue;
         System.Action bestPurchase = null;
         string bestLabel = "";
-        ConsiderAutoUpgrade("玉の価値", UpgradeCost(10, ballValueLevel), () => ballValueLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
-        ConsiderAutoUpgrade("連射", UpgradeCost(18, launchCountLevel), () => launchCountLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
+        ConsiderAutoUpgrade("玉の価値", BallValueUpgradeCost(ballValueLevel), () => ballValueLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
+        if (launchCountLevel < 5)
+            ConsiderAutoUpgrade("連射", UpgradeCost(18, launchCountLevel), () => launchCountLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         ConsiderAutoUpgrade("発射パワー", UpgradeCost(12, launchPowerLevel), () => launchPowerLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         ConsiderAutoUpgrade("大当たり率", UpgradeCost(24, jackpotLevel), () => jackpotLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         ConsiderAutoUpgrade("確変率", UpgradeCost(24, probabilityChangeLevel), () => probabilityChangeLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
@@ -1069,6 +1613,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         ClearActiveBalls();
         autoLaunch = false;
         pendingBalls = 0;
+        hesoSpinQueue.Clear();
         kakuhenBallsRemaining = 0;
         consecutiveWins = 0;
         isSpinning = false;
@@ -1183,6 +1728,15 @@ public sealed class PachinkoGameController : MonoBehaviour
     private static long UpgradeCost(int baseCost, int level)
     {
         double cost = baseCost * System.Math.Pow(1.32d, System.Math.Max(0, level));
+        if (double.IsInfinity(cost) || cost >= long.MaxValue) return long.MaxValue;
+        return System.Math.Max(1L, (long)System.Math.Round(cost));
+    }
+
+    private float GetBallValueMultiplier() => 1f + ballValueLevel;
+
+    private static long BallValueUpgradeCost(int level)
+    {
+        double cost = 5d * System.Math.Pow(1.2d, System.Math.Max(0, level));
         if (double.IsInfinity(cost) || cost >= long.MaxValue) return long.MaxValue;
         return System.Math.Max(1L, (long)System.Math.Round(cost));
     }

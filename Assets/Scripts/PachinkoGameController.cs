@@ -83,6 +83,7 @@ public sealed class PachinkoGameController : MonoBehaviour
     private AudioClip launchSound;
     private AudioClip jackpotSound;
     private AudioClip jackpotVoice;
+    private AudioClip jackpotMaleVoice;
     private AudioClip backgroundMusic;
 
     private GUIStyle titleStyle;
@@ -958,7 +959,6 @@ public sealed class PachinkoGameController : MonoBehaviour
             long payout;
             if (jackpot)
             {
-                if (jackpotVoiceSource != null && jackpotVoice != null) jackpotVoiceSource.PlayOneShot(jackpotVoice, 1f);
                 consecutiveWins++;
                 double streakMultiplier = System.Math.Pow(1.35d, consecutiveWins - 1);
                 payout = System.Math.Max(1L, ScaleCurrency(80d * multiplier, streakMultiplier));
@@ -971,6 +971,9 @@ public sealed class PachinkoGameController : MonoBehaviour
                 jackpotPayoutDisplay = payout;
                 jackpotCelebrationMessage = kakuhen ? "確変突入！" : "大当たり！";
                 celebrationCharacterIndex = Random.Range(0, 4);
+                AudioClip characterVoice = celebrationCharacterIndex == 2 ? jackpotMaleVoice : jackpotVoice;
+                if (jackpotVoiceSource != null && characterVoice != null)
+                    jackpotVoiceSource.PlayOneShot(characterVoice, 1f);
                 celebrationCharacterSide = Random.Range(0, 2);
                 jackpotCelebrationDuration = 4.5f + Mathf.Min(consecutiveWins - 1, 12) * 0.35f;
                 jackpotFlashUntil = Time.time + jackpotCelebrationDuration;
@@ -1033,6 +1036,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         launchSound = Resources.Load<AudioClip>("Audio/launch");
         jackpotSound = Resources.Load<AudioClip>("Audio/jackpot");
         jackpotVoice = Resources.Load<AudioClip>("Audio/jackpot_voice");
+        jackpotMaleVoice = Resources.Load<AudioClip>("Audio/jackpot_voice_male");
         backgroundMusic = Resources.Load<AudioClip>("Audio/bgm");
         if (backgroundMusic != null)
         {

@@ -1,18 +1,27 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
+using BigInteger = System.Numerics.BigInteger;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 public sealed class PachinkoGameController : MonoBehaviour
 {
+    private enum PachinkoMode
+    {
+        Normal,
+        Rush,
+        KomaChallenge
+    }
+
     private static Texture2D celebrationCircleTexture;
     private static Texture2D aquariumBackdropTexture;
     private static Texture2D spotlightBeamTexture;
     private readonly Sprite[] aquariumFishSprites = new Sprite[4];
     private readonly Texture2D[] jackpotCharacterSprites = new Texture2D[4];
-    private const long ReincarnationBaseRequirement = 250_000L;
-    private const long ReincarnationRequirementMultiplier = 3L;
-    private const long MaxCurrencyAward = 9_000_000_000_000_000_000L;
+    private static readonly BigInteger ReincarnationBaseRequirement = new BigInteger(250_000);
+    private const int ReincarnationRequirementMultiplier = 3;
+    private static readonly BigInteger MaxCurrencyAward = BigInteger.Pow(10, 300);
     [Header("Scene references")]
     [SerializeField] private GameObject ballPrefab;
     [SerializeField] private Transform launchPoint;
@@ -29,9 +38,9 @@ public sealed class PachinkoGameController : MonoBehaviour
     private readonly string[] laneNames = { "入賞口", "チューリップ", "アタッカー", "ヘソ抽選", "アタッカー", "チューリップ", "入賞口" };
     private readonly int[] categoryLevels = new int[3];
 
-    private long money;
-    private long lifetimePayout;
-    private long runPayout;
+    private BigInteger money;
+    private BigInteger lifetimePayout;
+    private BigInteger runPayout;
     private int ballValueLevel;
     private int launchCountLevel;
     private int launchPowerLevel;
@@ -39,17 +48,19 @@ public sealed class PachinkoGameController : MonoBehaviour
     private int probabilityChangeLevel;
     private bool autoLaunch = true;
     private bool autoPurchase;
+    private bool isLaunchingBatch;
     private float nextAutoLaunch;
     private float nextAutoPurchase;
     private float nextManualLaunch;
     private int pendingBalls;
     private readonly Queue<float> hesoSpinQueue = new Queue<float>();
-    private int kakuhenBallsRemaining;
+    private PachinkoMode gameMode;
+    private int challengeSpinsRemaining;
     private int consecutiveWins;
     private bool isSpinning;
     private int lcdStoppedDigits;
     private float jackpotFlashUntil;
-    private long jackpotPayoutDisplay;
+    private BigInteger jackpotPayoutDisplay;
     private int jackpotStreakDisplay;
     private double jackpotPayoutMultiplierDisplay = 1d;
     private float jackpotCelebrationDuration = 4.5f;
@@ -63,6 +74,9 @@ public sealed class PachinkoGameController : MonoBehaviour
     private bool jackpotCameraShaking;
     private string lcdMessage = "保留を待っています";
     private readonly int[] lcdDigits = { 7, 7, 7 };
+    private int lcdChanceUpLevel;
+    private int lcdChanceCharacterIndex;
+    private float lcdSpinInterval = 0.068f;
     private float nextLcdDigitAt;
     private int reincarnationPoints;
     private int transcendencePoints;
@@ -73,6 +87,9 @@ public sealed class PachinkoGameController : MonoBehaviour
     private int transcendenceIncomeLevel;
     private int transcendenceVolleyLevel;
     private int transcendenceJackpotLevel;
+    private int divineIncomeLevel;
+    private int divineVolleyLevel;
+    private int divineJackpotLevel;
     private int currentTab;
     private int purchaseAmount = 1;
     private string lastResult = "スペースキーまたは「玉を打つ」で発射";
@@ -99,6 +116,8 @@ public sealed class PachinkoGameController : MonoBehaviour
     private GUIStyle panelStyle;
     private GUIStyle cardStyle;
     private GUIStyle subButtonStyle;
+    private GUIStyle hudIconStyle;
+    private GUIStyle upgradeGlyphStyle;
     private Vector2 scrollPosition;
     private Transform shooterPusher;
     private bool shooterAnimating;
@@ -107,9 +126,9 @@ public sealed class PachinkoGameController : MonoBehaviour
     {
         InitializeAudio();
         EnsureCabinetVisuals();
-        EnsureAquariumBackground();
+        EnsureCabinetCrown();
+        RemoveAquariumDecorations();
         EnsureOuterAquariumBackground();
-        Ensure3DAquariumDecorations();
         Ensure2DJackpotCharacters();
         EnsureShooterVisual();
         EnsureOuterWallColliders();
@@ -146,10 +165,10 @@ public sealed class PachinkoGameController : MonoBehaviour
                 CreateCabinetContour("Inner Blue Pin Guide", existingInnerOutline, 0.07f, 0.18f, existingBlue);
             }
             if (transform.Find("LCD Bezel") == null)
-                CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(3.55f, 1.42f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
+                CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(5.12f, 2.22f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
             if (transform.Find("LCD Screen") == null)
             {
-                GameObject existingScreen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(3.22f, 1.12f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
+                GameObject existingScreen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(4.8f, 1.9f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
                 existingScreen.GetComponent<Collider>().enabled = false;
             }
             if (transform.Find("Side Jewel 1") == null) CreateCabinetOrnaments(existingBrass, existingBlue);
@@ -192,8 +211,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         for (int i = 0; i < outline.Length; i++) innerOutline[i] = outline[i] * 0.96f;
         CreateCabinetContour("Inner Blue Pin Guide", innerOutline, 0.07f, 0.18f, blue);
 
-        CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(3.55f, 1.42f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
-        GameObject screen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(3.22f, 1.12f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
+        CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(5.12f, 2.22f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
+        GameObject screen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(4.8f, 1.9f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
         screen.GetComponent<Collider>().enabled = false;
         CreateCabinetOrnaments(brass, blue);
         PositionLCDParts();
@@ -203,9 +222,17 @@ public sealed class PachinkoGameController : MonoBehaviour
     private void PositionLCDParts()
     {
         Transform bezel = transform.Find("LCD Bezel");
-        if (bezel != null) bezel.localPosition = new Vector3(0f, -0.05f, 0.34f);
+        if (bezel != null)
+        {
+            bezel.localPosition = new Vector3(0f, -0.05f, 0.34f);
+            bezel.localScale = new Vector3(5.12f, 2.22f, 0.18f);
+        }
         Transform screen = transform.Find("LCD Screen");
-        if (screen != null) screen.localPosition = new Vector3(0f, -0.05f, 0.22f);
+        if (screen != null)
+        {
+            screen.localPosition = new Vector3(0f, -0.05f, 0.22f);
+            screen.localScale = new Vector3(4.8f, 1.9f, 0.08f);
+        }
     }
 
     private static Vector2[] CabinetOutline()
@@ -394,18 +421,25 @@ public sealed class PachinkoGameController : MonoBehaviour
         for (int y = 0; y < size; y++)
         for (int x = 0; x < size; x++)
         {
+            float u = x / (float)(size - 1);
             float v = y / (float)(size - 1);
-            Color deep = new Color(0.018f, 0.11f, 0.23f);
-            Color mid = new Color(0.055f, 0.37f, 0.48f);
-            Color surface = new Color(0.025f, 0.19f, 0.34f);
-            Color baseColor = v < 0.55f
-                ? Color.Lerp(deep, mid, v / 0.55f)
-                : Color.Lerp(mid, surface, (v - 0.55f) / 0.45f);
-            float wave = Mathf.Sin(x * 0.16f + y * 0.11f) + Mathf.Sin(x * 0.07f - y * 0.19f) * 0.45f;
-            if (y < 34 && Mathf.Abs(wave - 0.8f) < 0.1f)
-                baseColor = Color.Lerp(baseColor, new Color(0.14f, 0.66f, 0.72f), 0.3f);
-            if (((x * 37 + y * 61) % 263) == 0)
-                baseColor = Color.Lerp(baseColor, new Color(0.52f, 0.87f, 0.91f), 0.34f);
+            float dx = u - 0.5f;
+            float dy = v - 0.55f;
+            float radius = Mathf.Sqrt(dx * dx + dy * dy);
+            Color deep = new Color(0.012f, 0.035f, 0.12f);
+            Color sapphire = new Color(0.025f, 0.18f, 0.42f);
+            Color baseColor = Color.Lerp(deep, sapphire, Mathf.Clamp01(v * 0.52f + 0.24f));
+            float bloom = Mathf.Clamp01(1f - radius * 1.65f);
+            float angle = Mathf.Atan2(dy, dx);
+            float rays = Mathf.Pow(Mathf.Clamp01(0.5f + 0.5f * Mathf.Cos(angle * 12f + radius * 2.2f)), 18f);
+            baseColor = Color.Lerp(baseColor, new Color(0.035f, 0.31f, 0.7f), bloom * (0.28f + rays * 0.58f));
+            float shimmer = Mathf.Sin(x * 0.25f + y * 0.17f) * Mathf.Sin(y * 0.21f - x * 0.08f);
+            baseColor += new Color(0.02f, 0.065f, 0.12f) * Mathf.Max(0f, shimmer) * 0.24f;
+            int sparkle = (x * 37 + y * 61) % 263;
+            if (sparkle == 0 || sparkle == 1)
+                baseColor = Color.Lerp(baseColor, new Color(0.46f, 0.86f, 1f), 0.82f);
+            else if ((x * 13 + y * 29) % 997 == 0)
+                baseColor = Color.Lerp(baseColor, new Color(0.92f, 0.31f, 0.79f), 0.55f);
             pixels[y * size + x] = baseColor;
         }
         aquariumBackdropTexture.SetPixels(pixels);
@@ -444,6 +478,45 @@ public sealed class PachinkoGameController : MonoBehaviour
             jewel.transform.localScale = new Vector3(0.25f, 0.25f, 0.12f);
             jewel.GetComponent<Collider>().enabled = false;
             jewel.GetComponent<Renderer>().sharedMaterial = i % 2 == 0 ? brass : blue;
+        }
+    }
+
+    private void EnsureCabinetCrown()
+    {
+        if (transform.Find("Cabinet Crown Base") != null) return;
+        Material gold = CreateVisualMaterial("Cabinet Crown Gold", new Color(1f, 0.62f, 0.12f));
+        Material blue = CreateVisualMaterial("Cabinet Crown Sapphire", new Color(0.04f, 0.55f, 1f));
+        Material ice = CreateVisualMaterial("Cabinet Crown Ice", new Color(0.48f, 0.9f, 1f));
+
+        GameObject crownBase = CreateCabinetCube("Cabinet Crown Base", new Vector3(0f, 4.88f, 0.035f), new Vector3(1.28f, 0.22f, 0.28f), gold);
+        crownBase.GetComponent<Collider>().enabled = false;
+        GameObject crownTop = CreateCabinetCube("Cabinet Crown Top", new Vector3(0f, 5.02f, 0.035f), new Vector3(0.66f, 0.12f, 0.24f), blue);
+        crownTop.transform.localRotation = Quaternion.Euler(0f, 0f, 45f);
+        crownTop.GetComponent<Collider>().enabled = false;
+        for (int side = -1; side <= 1; side += 2)
+        {
+            GameObject wing = CreateCabinetCube("Cabinet Crown Wing " + side, new Vector3(side * 0.48f, 4.99f, 0.04f), new Vector3(0.58f, 0.105f, 0.22f), gold);
+            wing.transform.localRotation = Quaternion.Euler(0f, 0f, side * -18f);
+            wing.GetComponent<Collider>().enabled = false;
+        }
+
+        GameObject centerGem = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        centerGem.name = "Cabinet Crown Center Gem";
+        centerGem.transform.SetParent(transform, false);
+        centerGem.transform.localPosition = new Vector3(0f, 4.93f, -0.08f);
+        centerGem.transform.localScale = new Vector3(0.28f, 0.28f, 0.14f);
+        centerGem.GetComponent<Collider>().enabled = false;
+        centerGem.GetComponent<Renderer>().sharedMaterial = ice;
+
+        for (int side = -1; side <= 1; side += 2)
+        {
+            GameObject sideGem = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            sideGem.name = "Cabinet Crown Side Gem " + side;
+            sideGem.transform.SetParent(transform, false);
+            sideGem.transform.localPosition = new Vector3(side * 0.77f, 4.82f, 0.02f);
+            sideGem.transform.localScale = new Vector3(0.16f, 0.16f, 0.11f);
+            sideGem.GetComponent<Collider>().enabled = false;
+            sideGem.GetComponent<Renderer>().sharedMaterial = blue;
         }
     }
 
@@ -560,7 +633,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         if (isSpinning && Time.time >= nextLcdDigitAt)
         {
             RollLcdDigits();
-            nextLcdDigitAt = Time.time + 0.055f;
+            nextLcdDigitAt = Time.time + lcdSpinInterval;
         }
 
         if (Keyboard.current != null && Keyboard.current.spaceKey.isPressed)
@@ -583,7 +656,7 @@ public sealed class PachinkoGameController : MonoBehaviour
 
         if (autoPurchase && Time.time >= nextAutoPurchase)
         {
-            nextAutoPurchase = Time.time + 0.2f;
+            nextAutoPurchase = Time.time + 0.05f;
             TryAutoPurchase();
         }
 
@@ -624,6 +697,24 @@ public sealed class PachinkoGameController : MonoBehaviour
             aquariumFishHomes.Add(homes[i]);
             aquariumFishSpeeds.Add(0.22f + (i % 4) * 0.055f);
         }
+    }
+
+    private void RemoveAquariumDecorations()
+    {
+        Transform[] sceneParts = GetComponentsInChildren<Transform>(true);
+        foreach (Transform part in sceneParts)
+        {
+            if (part == transform) continue;
+            string partName = part.name;
+            if (partName.StartsWith("Pixel Aquarium Fish ")
+                || partName.StartsWith("3D Aquarium Fish ")
+                || partName.StartsWith("3D Aquarium Coral ")
+                || partName.StartsWith("3D Aquarium Bubble "))
+                part.gameObject.SetActive(false);
+        }
+        aquariumFish.Clear();
+        aquariumFishHomes.Clear();
+        aquariumFishSpeeds.Clear();
     }
 
     private Transform CreateFishPart(Transform parent, string partName, PrimitiveType type, Vector3 position, Vector3 scale, Material material)
@@ -825,27 +916,34 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     public void LaunchBatch()
     {
-        if (ballPrefab == null || launchPoint == null || Time.time < nextManualLaunch)
+        if (ballPrefab == null || launchPoint == null || isLaunchingBatch || Time.time < nextManualLaunch)
         {
             return;
         }
 
         nextManualLaunch = Time.time + Mathf.Max(0.08f, 0.22f - reincarnationLaunchSpeedLevel * 0.015f);
-        int count = 1 + launchCountLevel + transcendenceVolleyLevel * 2;
+        int count = 1 + launchCountLevel + transcendenceVolleyLevel * 2 + divineVolleyLevel * 10;
         PlaySound(launchSound, 0.58f, Random.Range(0.96f, 1.04f));
+        isLaunchingBatch = true;
+        if (shooterPusher != null) StartCoroutine(AnimateShooter());
+        StartCoroutine(LaunchBallsInSequence(count));
+        lastResult = count > 1 ? $"{count}発発射！" : "発射！";
+    }
 
+    private IEnumerator LaunchBallsInSequence(int count)
+    {
+        float spacing = Mathf.Clamp(0.06f - reincarnationLaunchSpeedLevel * 0.004f, 0.03f, 0.06f);
         for (int i = 0; i < count; i++)
         {
             SpawnBall();
+            if (i < count - 1) yield return new WaitForSeconds(spacing);
         }
-
-        lastResult = count > 1 ? $"{count}発発射！" : "発射！";
+        isLaunchingBatch = false;
     }
 
     private void SpawnBall()
     {
-        if (shooterPusher != null) StartCoroutine(AnimateShooter());
-        Vector3 jitter = new Vector3(Random.Range(-0.035f, 0.035f), Random.Range(-0.02f, 0.02f), 0f);
+        Vector3 jitter = new Vector3(Random.Range(-0.004f, 0.004f), 0f, 0f);
         GameObject instance = Instantiate(ballPrefab, launchPoint.position + jitter, Quaternion.identity, ballContainer);
         instance.name = "PachinkoBall";
 
@@ -892,7 +990,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         float multiplier = GetBallValueMultiplier()
             * (1f + categoryLevels[category] * 0.5f)
             * (1f + reincarnationUpgradeLevel * 0.15f)
-            * Mathf.Pow(2f, transcendenceIncomeLevel);
+            * Mathf.Pow(2f, transcendenceIncomeLevel)
+            * Mathf.Pow(10f, divineIncomeLevel);
 
         if (laneIndex == 3)
         {
@@ -905,9 +1004,9 @@ public sealed class PachinkoGameController : MonoBehaviour
             }
             else
             {
-                money = AddCurrencySaturating(money, 1L);
-                lifetimePayout = AddCurrencySaturating(lifetimePayout, 1L);
-                runPayout = AddCurrencySaturating(runPayout, 1L);
+                money += BigInteger.One;
+                lifetimePayout += BigInteger.One;
+                runPayout += BigInteger.One;
                 lastResult = "保留が満タン　+¥1";
             }
 
@@ -915,12 +1014,12 @@ public sealed class PachinkoGameController : MonoBehaviour
             return;
         }
 
-        long payout = System.Math.Max(1L, ScaleCurrency(lanePayouts[Mathf.Clamp(laneIndex, 0, lanePayouts.Length - 1)], multiplier));
+        BigInteger payout = BigInteger.Max(BigInteger.One, ScaleCurrency(lanePayouts[Mathf.Clamp(laneIndex, 0, lanePayouts.Length - 1)], multiplier));
         lastResult = $"{gateName} +¥{FormatCurrency(payout)}";
 
-        money = AddCurrencySaturating(money, payout);
-        lifetimePayout = AddCurrencySaturating(lifetimePayout, payout);
-        runPayout = AddCurrencySaturating(runPayout, payout);
+        money += payout;
+        lifetimePayout += payout;
+        runPayout += payout;
         Destroy(ball.gameObject, 0.05f);
     }
 
@@ -930,46 +1029,93 @@ public sealed class PachinkoGameController : MonoBehaviour
         while (hesoSpinQueue.Count > 0)
         {
             float multiplier = hesoSpinQueue.Dequeue();
-            bool alreadyInKakuhen = kakuhenBallsRemaining > 0;
-            bool jackpot = alreadyInKakuhen || Random.value < JackpotChance;
-            bool kakuhen = jackpot && (alreadyInKakuhen || Random.value < KakuhenChance);
+            PachinkoMode modeAtSpin = gameMode;
+            float activeJackpotChance = modeAtSpin == PachinkoMode.Rush ? RushJackpotChance
+                : modeAtSpin == PachinkoMode.KomaChallenge ? KomaChallengeChance : JackpotChance;
+            bool jackpot = Random.value < activeJackpotChance;
+            bool rushFall = modeAtSpin == PachinkoMode.Rush && !jackpot && Random.value < 1f / 117.3f;
+            bool entersRush = jackpot && modeAtSpin != PachinkoMode.Normal;
+            int rewardBalls = 0;
+            bool ubauneJackpot = false;
+            if (jackpot)
+            {
+                if (modeAtSpin == PachinkoMode.Normal)
+                {
+                    bool specialRushHit = Random.value < 0.005f;
+                    rewardBalls = specialRushHit ? 3000 : 300;
+                    entersRush = specialRushHit || Random.value < Mathf.Clamp01((KakuhenChance - 0.005f) / 0.995f);
+                }
+                else if (modeAtSpin == PachinkoMode.KomaChallenge)
+                    rewardBalls = 300;
+                else if (Random.value < 0.057f)
+                {
+                    ubauneJackpot = true;
+                    float payoutRoll = Random.value;
+                    rewardBalls = payoutRoll < 0.5f ? 3000 : payoutRoll < 0.75f ? 4500 : payoutRoll < 0.875f ? 6000 : payoutRoll < 0.9375f ? 7500 : 9000;
+                }
+                else
+                    rewardBalls = Random.value < 0.227f / (1f - 0.057f) ? 3000 : 1500;
+            }
+            int resultSymbol = jackpot ? Random.Range(1, 10) : 0;
             int[] resultDigits = jackpot
-                ? new[] { 7, 7, 7 }
+                ? new[] { resultSymbol, resultSymbol, resultSymbol }
                 : new[] { Random.Range(1, 10), Random.Range(1, 10), Random.Range(1, 10) };
             if (!jackpot && resultDigits[0] == resultDigits[1] && resultDigits[1] == resultDigits[2])
                 resultDigits[2] = resultDigits[2] % 9 + 1;
 
+            lcdChanceUpLevel = RollChanceUpLevel(jackpot);
+            lcdChanceCharacterIndex = Random.Range(0, jackpotCharacterSprites.Length);
+            // Winning spins run and settle nearly twice as quickly for a sharper hit reveal.
+            lcdSpinInterval = jackpot ? 0.035f : 0.068f;
             lcdStoppedDigits = 0;
             nextLcdDigitAt = Time.time;
             RollLcdDigits();
-            lcdMessage = "抽選中…";
-            yield return new WaitForSeconds(1.15f);
+            lcdMessage = GetChanceUpMessage(lcdChanceUpLevel);
+            yield return new WaitForSeconds(jackpot ? 1.05f : 2f);
 
             lcdStoppedDigits = 1;
             lcdDigits[0] = resultDigits[0];
-            lcdMessage = resultDigits[0] == resultDigits[1] ? "リーチ！" : "数字停止…";
-            yield return new WaitForSeconds(0.35f);
+            lcdMessage = resultDigits[0] == resultDigits[1]
+                ? $"リーチ！　{GetChanceUpMessage(lcdChanceUpLevel)}" : "数字停止…";
+            yield return new WaitForSeconds(jackpot ? 0.28f : 0.55f);
             lcdStoppedDigits = 2;
             lcdDigits[1] = resultDigits[1];
-            lcdMessage = resultDigits[0] == resultDigits[1] ? "最後の数字に注目！" : "数字停止…";
-            yield return new WaitForSeconds(0.4f);
+            lcdMessage = resultDigits[0] == resultDigits[1]
+                ? $"最終図柄に注目！　{GetChanceUpMessage(lcdChanceUpLevel)}" : "数字停止…";
+            yield return new WaitForSeconds(jackpot ? 0.4f : 0.8f);
             lcdStoppedDigits = 3;
             lcdDigits[2] = resultDigits[2];
+            // Leave the completed combination on screen before the outcome overlay begins.
+            yield return new WaitForSeconds(jackpot ? 0.25f : 0.45f);
 
-            long payout;
+            BigInteger payout;
             if (jackpot)
             {
                 consecutiveWins++;
                 double streakMultiplier = System.Math.Pow(1.35d, consecutiveWins - 1);
-                payout = System.Math.Max(1L, ScaleCurrency(80d * multiplier, streakMultiplier));
+                payout = BigInteger.Max(BigInteger.One, ScaleCurrency(rewardBalls * multiplier, streakMultiplier));
                 jackpotStreakDisplay = consecutiveWins;
-                jackpotPayoutMultiplierDisplay = System.Math.Min(MaxCurrencyAward, streakMultiplier);
-                if (alreadyInKakuhen) kakuhenBallsRemaining--;
-                if (kakuhen && !alreadyInKakuhen) kakuhenBallsRemaining = 8;
-                lcdMessage = kakuhen ? "777　大当たり！　確変突入" : "777　大当たり！";
-                lastResult = kakuhen ? $"大当たり！確変突入　+¥{FormatCurrency(payout)}" : $"大当たり！　+¥{FormatCurrency(payout)}";
+                jackpotPayoutMultiplierDisplay = streakMultiplier;
+                if (modeAtSpin == PachinkoMode.Normal)
+                    gameMode = entersRush ? PachinkoMode.Rush : PachinkoMode.KomaChallenge;
+                else if (modeAtSpin == PachinkoMode.KomaChallenge)
+                    gameMode = PachinkoMode.Rush;
+                else
+                    gameMode = PachinkoMode.Rush;
+                if (modeAtSpin == PachinkoMode.Normal && !entersRush) challengeSpinsRemaining = 100;
+                if (modeAtSpin == PachinkoMode.Rush && ubauneJackpot) gameMode = PachinkoMode.Rush;
+                string alignedDigits = $"{resultSymbol}{resultSymbol}{resultSymbol}";
+                lcdMessage = ubauneJackpot ? $"{alignedDigits}　ウバウネ決戦！"
+                    : resultSymbol == 7 ? "777　プレミア大当たり！" : $"{alignedDigits}　大当たり！";
+                string winStatus = modeAtSpin == PachinkoMode.Normal
+                    ? (entersRush ? "RUSH突入！" : "コマチャレンジ突入！")
+                    : modeAtSpin == PachinkoMode.KomaChallenge ? "RUSH引き戻し！"
+                    : ubauneJackpot ? "ウバウネ決戦！" : "RUSH継続！";
+                lastResult = $"大当たり！{winStatus} +¥{FormatCurrency(payout)}";
                 jackpotPayoutDisplay = payout;
-                jackpotCelebrationMessage = kakuhen ? "確変突入！" : "大当たり！";
+                jackpotCelebrationMessage = modeAtSpin == PachinkoMode.Normal && entersRush ? "確変突入！"
+                    : modeAtSpin == PachinkoMode.Normal ? "コマチャレンジ突入！"
+                    : ubauneJackpot ? "ウバウネ決戦！" : "大当たり！";
                 celebrationCharacterIndex = Random.Range(0, 4);
                 AudioClip characterVoice = celebrationCharacterIndex == 2 ? jackpotMaleVoice : jackpotVoice;
                 if (jackpotVoiceSource != null && characterVoice != null)
@@ -997,14 +1143,39 @@ public sealed class PachinkoGameController : MonoBehaviour
             else
             {
                 payout = ScaleCurrency(2d, multiplier);
-                consecutiveWins = 0;
-                lcdMessage = resultDigits[0] == resultDigits[1] ? "リーチ…　残念！" : "ハズレ";
-                lastResult = "ヘソ抽選　ハズレ";
+                if (modeAtSpin == PachinkoMode.Rush)
+                {
+                    if (rushFall)
+                    {
+                        gameMode = PachinkoMode.KomaChallenge;
+                        challengeSpinsRemaining = 100;
+                        consecutiveWins = 0;
+                        lastResult = "最終決戦敗北…　コマチャレンジ突入！";
+                    }
+                    else lastResult = "RUSH継続中…";
+                }
+                else if (modeAtSpin == PachinkoMode.KomaChallenge)
+                {
+                    challengeSpinsRemaining = Mathf.Max(0, challengeSpinsRemaining - 1);
+                    if (challengeSpinsRemaining == 0)
+                    {
+                        gameMode = PachinkoMode.Normal;
+                        lastResult = "コマチャレンジ終了… 通常時へ";
+                    }
+                    else lastResult = $"コマチャレンジ残り{challengeSpinsRemaining}回";
+                    consecutiveWins = 0;
+                }
+                else
+                {
+                    consecutiveWins = 0;
+                    lastResult = "ヘソ抽選　ハズレ";
+                }
+                lcdMessage = rushFall ? "最終決戦…　敗北" : resultDigits[0] == resultDigits[1] ? "リーチ…　残念！" : "ハズレ";
             }
 
-            money = AddCurrencySaturating(money, payout);
-            lifetimePayout = AddCurrencySaturating(lifetimePayout, payout);
-            runPayout = AddCurrencySaturating(runPayout, payout);
+            money += payout;
+            lifetimePayout += payout;
+            runPayout += payout;
             pendingBalls = Mathf.Max(0, pendingBalls - 1);
             yield return new WaitForSeconds(0.35f);
         }
@@ -1098,23 +1269,17 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
     }
 
-    private static long AddCurrencySaturating(long balance, long amount)
+    private static BigInteger ScaleCurrency(double baseAmount, double multiplier)
     {
-        if (amount <= 0L) return balance;
-        return balance > long.MaxValue - amount ? long.MaxValue : balance + amount;
-    }
-
-    private static long ScaleCurrency(double baseAmount, double multiplier)
-    {
-        if (double.IsNaN(baseAmount) || double.IsNaN(multiplier) || baseAmount <= 0d || multiplier <= 0d) return 0L;
+        if (double.IsNaN(baseAmount) || double.IsNaN(multiplier) || baseAmount <= 0d || multiplier <= 0d) return BigInteger.Zero;
         double scaled = baseAmount * multiplier;
-        if (double.IsInfinity(scaled) || scaled >= MaxCurrencyAward) return MaxCurrencyAward;
-        return (long)System.Math.Max(0d, System.Math.Round(scaled));
+        if (double.IsInfinity(scaled) || scaled >= 1e300d) return MaxCurrencyAward;
+        return BigInteger.Min(MaxCurrencyAward, new BigInteger(System.Math.Max(0d, System.Math.Round(scaled))));
     }
 
-    private static string FormatCurrency(long amount)
+    private static string FormatCurrency(BigInteger amount)
     {
-        return amount.ToString("N0");
+        return amount.ToString("N0", CultureInfo.InvariantCulture);
     }
 
     private static string FormatMultiplier(double multiplier)
@@ -1122,8 +1287,35 @@ public sealed class PachinkoGameController : MonoBehaviour
         return multiplier >= 1_000d ? multiplier.ToString("0.##E+0") : multiplier.ToString("0.00");
     }
 
-    private float JackpotChance => Mathf.Clamp(Mathf.Clamp(0.05f + jackpotLevel * 0.02f, 0.05f, 0.5f) + jackpotMemoryUpgradeLevel * 0.01f + transcendenceJackpotLevel * 0.05f, 0.05f, 0.9f);
-    private float KakuhenChance => Mathf.Clamp(0.1f + probabilityChangeLevel * 0.05f, 0.1f, 0.8f);
+    private const float BaseNormalJackpotChance = 1f / 319.7f;
+    private float JackpotChance => GetJackpotChance(jackpotLevel);
+    private float RushJackpotChance => Mathf.Clamp(1f / 41.9f + JackpotChance - BaseNormalJackpotChance, 0.0001f, 0.9f);
+    private float KomaChallengeChance => Mathf.Clamp(1f / 399.6f + JackpotChance - BaseNormalJackpotChance, 0.0001f, 0.9f);
+    private float GetJackpotChance(int level) => GetJackpotChance(level, divineJackpotLevel);
+    private float GetJackpotChance(int level, int divineLevel) => Mathf.Clamp(BaseNormalJackpotChance + level * 0.02f + jackpotMemoryUpgradeLevel * 0.01f + transcendenceJackpotLevel * 0.05f + divineLevel * 0.1f, BaseNormalJackpotChance, 0.9f);
+    private int GetJackpotUpgradeLimit()
+    {
+        int level = jackpotLevel;
+        while (level < 22 && GetJackpotChance(level + 1) > GetJackpotChance(level)) level++;
+        return level;
+    }
+    private float KakuhenChance => GetKakuhenChance(probabilityChangeLevel);
+    private static float GetKakuhenChance(int level) => Mathf.Clamp(0.5f + level * 0.05f, 0.5f, 0.95f);
+    private int GetKakuhenUpgradeLimit()
+    {
+        int level = probabilityChangeLevel;
+        while (level < 14 && GetKakuhenChance(level + 1) > GetKakuhenChance(level)) level++;
+        return level;
+    }
+    private int GetDivineJackpotUpgradeLimit()
+    {
+        int level = divineJackpotLevel;
+        while (level < 5 && GetJackpotChance(jackpotLevel, level + 1) > GetJackpotChance(jackpotLevel, level))
+        {
+            level++;
+        }
+        return level;
+    }
     private int MaxPendingBalls => 4 + holdCapacityUpgradeLevel;
 
     private void OnGUI()
@@ -1131,14 +1323,126 @@ public sealed class PachinkoGameController : MonoBehaviour
         EnsureStyles();
         float w = Screen.width;
         float h = Screen.height;
-        float top = Mathf.Clamp(h * 0.085f, 58f, 82f);
-        float boardWidth = w * 0.55f;
+        float top = Mathf.Clamp(h * 0.09f, 62f, 92f);
+        float boardWidth = w * 0.60f;
+        DrawCabinetBackdrop(w, h);
         DrawHud(new Rect(0f, 0f, w, top));
-        DrawLCD(GetLCDScreenRect(boardWidth, h));
-        GUI.Label(new Rect(boardWidth * 0.32f, h * 0.59f, boardWidth * 0.36f, 30f), "▼　ヘソ　保留 +1　▼", hesoLabelStyle);
-        DrawBoardControls(new Rect(12f, h - 72f, boardWidth - 24f, 58f));
-        DrawSidePanel(new Rect(boardWidth + 8f, top + 8f, w - boardWidth - 20f, h - top - 18f));
+        DrawPlayfieldFrame(new Rect(4f, top + 3f, boardWidth - 8f, h - top - 80f));
+        Rect lcdRect = GetLCDScreenRect(boardWidth, h);
+        DrawLCD(lcdRect);
+        float hesoLabelY = Mathf.Min(lcdRect.yMax + 2f, h - 112f);
+        GUI.Label(new Rect(boardWidth * 0.32f, hesoLabelY, boardWidth * 0.36f, 30f), "▼　ヘソ　保留 +1　▼", hesoLabelStyle);
+        DrawBoardControls(new Rect(8f, h - 76f, boardWidth - 16f, 68f));
+        DrawSidePanel(new Rect(boardWidth + 6f, top + 4f, w - boardWidth - 10f, h - top - 10f));
         if (Time.time < jackpotFlashUntil) DrawJackpotCelebration(boardWidth, h);
+    }
+
+    private void DrawCabinetBackdrop(float width, float height)
+    {
+        Color old = GUI.color;
+        float split = width * 0.60f;
+        float top = Mathf.Clamp(height * 0.09f, 62f, 92f);
+        GUI.color = new Color(0.006f, 0.012f, 0.035f, 0.035f);
+        GUI.DrawTexture(new Rect(0f, 0f, width, height), Texture2D.whiteTexture);
+
+        // Tint the live 3D playfield lightly; keep its pegs, balls and new backdrop visible.
+        GUI.color = new Color(0.018f, 0.095f, 0.28f, 0.12f);
+        GUI.DrawTexture(new Rect(0f, top, split, height - top), Texture2D.whiteTexture);
+        GUI.color = new Color(0.009f, 0.026f, 0.075f, 0.99f);
+        GUI.DrawTexture(new Rect(split, 0f, width - split, height), Texture2D.whiteTexture);
+        GUI.color = new Color(0.04f, 0.18f, 0.34f, 0.86f);
+        GUI.DrawTexture(new Rect(0f, top, split, 3f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(split - 3f, 0f, 3f, height), Texture2D.whiteTexture);
+
+        // Subtle luminous facets make the empty outer space read as part of the cabinet.
+        float glow = 0.25f + Mathf.PingPong(Time.time * 0.16f, 0.18f);
+        GUI.color = new Color(0.03f, 0.42f, 0.82f, glow);
+        GUI.DrawTexture(new Rect(0f, top + 4f, 5f, height - top - 80f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(split - 7f, top + 4f, 5f, height - top - 80f), Texture2D.whiteTexture);
+        for (int i = 0; i < 12; i++)
+        {
+            float x = Mathf.Repeat(i * 139f + 41f, width);
+            float y = top + 26f + Mathf.Repeat(i * 83f, Mathf.Max(1f, height - top - 125f));
+            float size = i % 3 == 0 ? 4f : 2f;
+            GUI.color = new Color(0.15f, 0.68f, 1f, 0.18f + 0.12f * Mathf.Sin(Time.time * 1.5f + i));
+            GUI.DrawTexture(new Rect(x, y, size, size), Texture2D.whiteTexture);
+        }
+        GUI.color = old;
+    }
+
+    private void DrawPlayfieldFrame(Rect rect)
+    {
+        Color old = GUI.color;
+        float t = Mathf.Clamp(Screen.height * 0.019f, 12f, 22f);
+        GUI.color = new Color(0.38f, 0.2f, 0.07f, 1f);
+        const float shadow = 2f;
+        GUI.DrawTexture(new Rect(rect.x - shadow, rect.y - shadow, rect.width + shadow * 2f, shadow), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x - shadow, rect.yMax, rect.width + shadow * 2f, shadow), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x - shadow, rect.y, shadow, rect.height), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.xMax, rect.y, shadow, rect.height), Texture2D.whiteTexture);
+        GUI.color = new Color(0.95f, 0.62f, 0.2f, 1f);
+        GUI.DrawTexture(new Rect(rect.x, rect.y, rect.width, t), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x, rect.yMax - t, rect.width, t), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x, rect.y, t, rect.height), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.xMax - t, rect.y, t, rect.height), Texture2D.whiteTexture);
+        GUI.color = new Color(0.035f, 0.11f, 0.23f, 1f);
+        float bevel = Mathf.Max(2f, t * 0.22f);
+        GUI.DrawTexture(new Rect(rect.x + bevel, rect.y + bevel, rect.width - bevel * 2f, t - bevel), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x + bevel, rect.yMax - t + bevel, rect.width - bevel * 2f, t - bevel), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x + bevel, rect.y + t, t - bevel, rect.height - t * 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.xMax - t + bevel, rect.y + t, t - bevel, rect.height - t * 2f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.12f, 0.68f, 1f, 0.96f);
+        GUI.DrawTexture(new Rect(rect.x + t, rect.y + t, rect.width - t * 2f, 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x + t, rect.yMax - t - 2f, rect.width - t * 2f, 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x + t, rect.y + t, 2f, rect.height - t * 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.xMax - t - 2f, rect.y + t, 2f, rect.height - t * 2f), Texture2D.whiteTexture);
+        for (int i = 0; i < 7; i++)
+        {
+            float y = Mathf.Lerp(rect.y + t * 1.5f, rect.yMax - t * 1.5f, i / 6f);
+            DrawFrameGem(rect.x + t * 0.5f, y, t * 0.6f);
+            DrawFrameGem(rect.xMax - t * 0.5f, y, t * 0.6f);
+        }
+        DrawFrameGem(rect.center.x, rect.y + t * 0.5f, t * 0.72f);
+        DrawFrameGem(rect.center.x, rect.yMax - t * 0.5f, t * 0.72f);
+        GUI.color = old;
+    }
+
+    private void DrawFrameGem(float x, float y, float size)
+    {
+        Color old = GUI.color;
+        Rect glow = new Rect(x - size * 0.72f, y - size * 0.72f, size * 1.44f, size * 1.44f);
+        GUI.color = new Color(0.05f, 0.58f, 1f, 0.28f);
+        GUI.DrawTexture(glow, GetCelebrationCircle());
+        Rect gem = new Rect(x - size * 0.5f, y - size * 0.5f, size, size);
+        GUIUtility.RotateAroundPivot(45f, new Vector2(x, y));
+        GUI.color = new Color(0.94f, 0.59f, 0.15f, 1f);
+        GUI.DrawTexture(gem, Texture2D.whiteTexture);
+        GUI.color = new Color(0.08f, 0.31f, 0.59f, 1f);
+        float inset = size * 0.16f;
+        GUI.DrawTexture(new Rect(gem.x + inset, gem.y + inset, size - inset * 2f, size - inset * 2f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.5f, 0.92f, 1f, 1f);
+        float core = size * 0.29f;
+        GUI.DrawTexture(new Rect(x - core * 0.5f, y - core * 0.5f, core, core), Texture2D.whiteTexture);
+        GUIUtility.RotateAroundPivot(-45f, new Vector2(x, y));
+        GUI.color = old;
+    }
+
+    private void DrawMetalPanel(Rect rect, float thickness = 3f)
+    {
+        Color old = GUI.color;
+        GUI.color = new Color(0.5f, 0.28f, 0.08f, 1f);
+        GUI.DrawTexture(rect, Texture2D.whiteTexture);
+        GUI.color = new Color(0.96f, 0.63f, 0.2f, 1f);
+        GUI.DrawTexture(new Rect(rect.x + thickness, rect.y + thickness, rect.width - thickness * 2f, rect.height - thickness * 2f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.12f, 0.34f, 0.62f, 1f);
+        GUI.DrawTexture(new Rect(rect.x + thickness * 2f, rect.y + thickness * 2f, rect.width - thickness * 4f, rect.height - thickness * 4f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.012f, 0.035f, 0.09f, 0.99f);
+        GUI.DrawTexture(new Rect(rect.x + thickness * 3f, rect.y + thickness * 3f, rect.width - thickness * 6f, rect.height - thickness * 6f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.38f, 0.83f, 1f, 0.76f);
+        GUI.DrawTexture(new Rect(rect.x + thickness * 2f, rect.y + thickness * 2f, rect.width - thickness * 4f, 1f), Texture2D.whiteTexture);
+        GUI.color = new Color(1f, 0.82f, 0.39f, 0.8f);
+        GUI.DrawTexture(new Rect(rect.x + thickness * 2f, rect.y + thickness * 2f, rect.width - thickness * 4f, 1f), Texture2D.whiteTexture);
+        GUI.color = old;
     }
 
     private void DrawJackpotCelebration(float boardWidth, float screenHeight)
@@ -1152,10 +1456,10 @@ public sealed class PachinkoGameController : MonoBehaviour
         DrawJackpotImpactFlash(boardWidth, screenHeight, elapsed);
         DrawJackpotStarburst(boardWidth, screenHeight, elapsed, remaining);
         DrawPFlashFrame(boardWidth, screenHeight, elapsed);
-        GUI.color = new Color(1f, 0.45f, 0.12f, 0.025f + 0.055f * pulse * remaining);
+        GUI.color = new Color(0.08f, 0.28f, 0.62f, 0.012f + 0.022f * pulse * remaining);
         float effectTop = Mathf.Clamp(screenHeight * 0.085f + 8f, 60f, 98f);
         float effectBottom = screenHeight - 74f;
-        GUI.DrawTexture(new Rect(0f, effectTop, boardWidth, Mathf.Max(0f, effectBottom - effectTop)), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(8f, effectTop, Mathf.Max(0f, boardWidth - 16f), Mathf.Max(0f, effectBottom - effectTop)), Texture2D.whiteTexture);
         DrawJackpotSpotlights(boardWidth, screenHeight, elapsed, remaining);
         int petalCount = 64 + Mathf.Min(jackpotStreakDisplay - 1, 8) * 12;
         for (int i = 0; i < petalCount; i++)
@@ -1239,19 +1543,19 @@ public sealed class PachinkoGameController : MonoBehaviour
         if (elapsed > 1.6f + chainTier * 0.16f) return;
         float pulse = Mathf.PingPong(elapsed * 8f, 1f);
         float alpha = Mathf.Clamp(0.35f + pulse * 0.55f + chainTier * 0.025f, 0f, 0.98f);
-        float thickness = Mathf.Clamp(screenHeight * (0.014f + chainTier * 0.0007f), 10f, 30f);
+        float thickness = Mathf.Clamp(screenHeight * (0.005f + chainTier * 0.00015f), 3f, 9f);
         float top = Mathf.Clamp(screenHeight * 0.085f + 8f, 60f, 98f);
         float bottom = screenHeight - 74f;
         Color oldColor = GUI.color;
-        Color frameColor = Color.Lerp(new Color(0.1f, 1f, 0.48f), new Color(1f, 0.2f, 0.72f), Mathf.Clamp01(chainTier / 8f));
+        Color frameColor = Color.Lerp(new Color(0.12f, 0.72f, 1f), new Color(0.98f, 0.18f, 0.68f), Mathf.Clamp01(chainTier / 8f));
         GUI.color = new Color(frameColor.r, frameColor.g, frameColor.b, alpha);
-        GUI.DrawTexture(new Rect(3f, top, thickness, bottom - top), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(boardWidth - thickness - 3f, top, thickness, bottom - top), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(3f, top, boardWidth - 6f, thickness), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(3f, bottom - thickness, boardWidth - 6f, thickness), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(8f, top, thickness, bottom - top), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(boardWidth - thickness - 8f, top, thickness, bottom - top), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(8f, top, boardWidth - 16f, thickness), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(8f, bottom - thickness, boardWidth - 16f, thickness), Texture2D.whiteTexture);
         GUI.color = new Color(0.88f, 1f, 0.94f, alpha * 0.85f);
-        GUI.DrawTexture(new Rect(thickness + 4f, top + thickness, 3f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(boardWidth - thickness - 7f, top + thickness, 3f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(thickness + 9f, top + thickness, 2f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(boardWidth - thickness - 11f, top + thickness, 2f, bottom - top - thickness * 2f), Texture2D.whiteTexture);
         GUI.color = oldColor;
     }
 
@@ -1366,16 +1670,19 @@ public sealed class PachinkoGameController : MonoBehaviour
         float envelope = 1f - elapsed / duration;
         float alpha = Mathf.Pow(wave, 2.2f) * envelope * Mathf.Min(0.48f + tier * 0.035f, 0.78f);
         if (alpha <= 0.01f) return;
-        Color flashColor = Color.Lerp(new Color(1f, 0.72f, 0.16f), new Color(1f, 0.26f, 0.54f), Mathf.Clamp01(tier / 8f));
+        Color oldColor = GUI.color;
+        Color flashColor = Color.Lerp(new Color(0.22f, 0.82f, 1f), new Color(1f, 0.24f, 0.66f), Mathf.Clamp01(tier / 8f));
         GUI.color = elapsed < 0.2f ? new Color(1f, 1f, 1f, alpha) : new Color(flashColor.r, flashColor.g, flashColor.b, alpha * 0.9f);
         float top = Mathf.Clamp(screenHeight * 0.085f + 8f, 60f, 98f);
         float bottom = screenHeight - 74f;
-        GUI.DrawTexture(new Rect(0f, top, boardWidth, Mathf.Max(0f, bottom - top)), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(8f, top, Mathf.Max(0f, boardWidth - 16f), Mathf.Max(0f, bottom - top)), Texture2D.whiteTexture);
+        GUI.color = oldColor;
     }
 
     private void DrawJackpotSpotlights(float boardWidth, float screenHeight, float elapsed, float remaining)
     {
         EnsureSpotlightBeamTexture();
+        Color oldColor = GUI.color;
         Rect lcd = GetLCDScreenRect(boardWidth, screenHeight);
         Vector2 focalPoint = lcd.center;
         float top = Mathf.Clamp(screenHeight * 0.085f + 10f, 62f, 102f);
@@ -1401,6 +1708,7 @@ public sealed class PachinkoGameController : MonoBehaviour
             GUI.DrawTexture(beam, spotlightBeamTexture, ScaleMode.StretchToFill, true);
             GUIUtility.RotateAroundPivot(-angle, center);
         }
+        GUI.color = oldColor;
     }
 
     private static void EnsureSpotlightBeamTexture()
@@ -1433,6 +1741,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         float tier = Mathf.Min(jackpotStreakDisplay - 1, 10);
         float burst = Mathf.Clamp01(1f - elapsed / (1.2f + tier * 0.1f));
         if (burst <= 0f) return;
+        Color oldColor = GUI.color;
         Vector2 center = GetLCDScreenRect(boardWidth, screenHeight).center;
         float rotation = Time.time * 28f;
         int rayCount = 20 + Mathf.RoundToInt(tier * 4f);
@@ -1447,6 +1756,7 @@ public sealed class PachinkoGameController : MonoBehaviour
             GUI.DrawTexture(new Rect(center.x - width * 0.5f, center.y - 118f - length, width, length), Texture2D.whiteTexture);
             GUIUtility.RotateAroundPivot(-angle, center);
         }
+        GUI.color = oldColor;
     }
 
     private void AnimateJackpotCameraShake()
@@ -1590,24 +1900,39 @@ public sealed class PachinkoGameController : MonoBehaviour
         Color oldColor = GUI.color;
         bool jackpotFlash = Time.time < jackpotFlashUntil;
         float flashPulse = jackpotFlash ? 0.72f + Mathf.PingPong(Time.time * 4f, 0.28f) : 1f;
+        Color spinColor = new Color(0.12f, 0.28f, 0.68f, 0.97f);
+        if (lcdChanceUpLevel == 1) spinColor = new Color(0.08f, 0.42f, 0.46f, 0.97f);
+        if (lcdChanceUpLevel == 2) spinColor = new Color(0.62f, 0.12f, 0.1f, 0.98f);
+        if (lcdChanceUpLevel >= 3)
+        {
+            float pulse = 0.75f + Mathf.PingPong(Time.time * 3f, 0.25f);
+            spinColor = new Color(0.68f * pulse, 0.38f * pulse, 0.06f, 0.99f);
+        }
         GUI.color = jackpotFlash
             ? new Color(0.08f, 0.48f * flashPulse, 0.62f * flashPulse, 0.98f)
-            : isSpinning ? new Color(0.12f, 0.28f, 0.68f, 0.97f) : new Color(0.035f, 0.08f, 0.22f, 0.94f);
+            : isSpinning ? spinColor : new Color(0.035f, 0.08f, 0.22f, 0.94f);
         GUI.Box(rect, GUIContent.none, panelStyle);
         GUI.color = oldColor;
-        string state = kakuhenBallsRemaining > 0 ? $"確変中　連チャン {consecutiveWins}" : "液晶抽選";
+        string state = gameMode == PachinkoMode.Rush ? $"ヨーデルSONIC怪闘　連チャン {consecutiveWins}"
+            : gameMode == PachinkoMode.KomaChallenge ? $"コマチャレンジ　残り {challengeSpinsRemaining}回" : "通常時　液晶抽選";
         string holds = $"保留　{pendingBalls}/{MaxPendingBalls}";
-        GUI.Label(new Rect(rect.x + 8f, rect.y + 2f, rect.width - 16f, rect.height * 0.2f), state, eyebrowStyle);
+        GUIStyle lcdStateStyle = new GUIStyle(eyebrowStyle)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.11f), 12, 24),
+            alignment = TextAnchor.MiddleLeft
+        };
+        GUI.Label(new Rect(rect.x + 12f, rect.y + 3f, rect.width - 24f, rect.height * 0.2f), state, lcdStateStyle);
         float gap = Mathf.Max(3f, rect.width * 0.018f);
-        float digitWidth = (rect.width - 16f - gap * 2f) / 3f;
+        float characterWidth = isSpinning && lcdChanceUpLevel >= 3 ? Mathf.Min(rect.width * 0.17f, rect.height * 0.56f) : 0f;
+        float digitWidth = (rect.width - 16f - characterWidth - gap * 2f) / 3f;
         float digitY = rect.y + rect.height * 0.22f;
         float digitHeight = rect.height * 0.56f;
         GUIStyle digitStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.58f), 12, 42),
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.58f), 12, 76),
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
-            normal = { textColor = jackpotFlash ? new Color(1f, 0.9f, 0.35f) : isSpinning ? new Color(0.65f, 0.9f, 1f) : new Color(1f, 0.82f, 0.28f) }
+            normal = { textColor = jackpotFlash || isSpinning && lcdChanceUpLevel >= 3 ? new Color(1f, 0.9f, 0.35f) : isSpinning && lcdChanceUpLevel == 2 ? new Color(1f, 0.68f, 0.55f) : isSpinning ? new Color(0.65f, 0.9f, 1f) : new Color(1f, 0.82f, 0.28f) }
         };
         for (int i = 0; i < lcdDigits.Length; i++)
         {
@@ -1617,14 +1942,44 @@ public sealed class PachinkoGameController : MonoBehaviour
             GUI.color = oldColor;
             GUI.Label(digitRect, lcdDigits[i].ToString(), digitStyle);
         }
+        if (characterWidth > 0f)
+        {
+            Texture2D character = jackpotCharacterSprites[Mathf.Clamp(lcdChanceCharacterIndex, 0, jackpotCharacterSprites.Length - 1)];
+            if (character != null)
+            {
+                Rect characterRect = new Rect(rect.xMax - characterWidth - 6f, digitY, characterWidth, digitHeight);
+                GUI.color = Color.white;
+                GUI.DrawTexture(characterRect, character, ScaleMode.ScaleToFit, true);
+            }
+        }
         GUIStyle messageStyle = new GUIStyle(eyebrowStyle)
         {
-            fontSize = Mathf.Clamp(eyebrowStyle.fontSize - 2, 10, 14),
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.09f), 10, 20),
             alignment = TextAnchor.MiddleCenter,
             normal = { textColor = Color.white }
         };
         GUI.Label(new Rect(rect.x + 8f, digitY + digitHeight, rect.width - 16f, rect.height * 0.18f),
-            isSpinning ? "回転中…　" + holds : lcdMessage + "　" + holds, messageStyle);
+            lcdMessage + "　" + holds, messageStyle);
+        GUI.color = oldColor;
+    }
+
+    private static int RollChanceUpLevel(bool jackpot)
+    {
+        float roll = Random.value;
+        if (jackpot)
+            return roll < 0.03f ? 0 : roll < 0.2f ? 1 : roll < 0.55f ? 2 : 3;
+        return roll < 0.82f ? 0 : roll < 0.97f ? 1 : roll < 0.999f ? 2 : 3;
+    }
+
+    private static string GetChanceUpMessage(int level)
+    {
+        switch (level)
+        {
+            case 1: return "保留変化！チャンスアップ";
+            case 2: return "赤演出！大チャンス！";
+            case 3: return "キャラ参戦！激アツ！！";
+            default: return "数字回転中…";
+        }
     }
 
     private void RollLcdDigits()
@@ -1637,17 +1992,17 @@ public sealed class PachinkoGameController : MonoBehaviour
         Camera mainCamera = Camera.main;
         if (mainCamera == null)
         {
-            float fallbackWidth = boardWidth * 0.38f;
-            float fallbackHeight = screenHeight * 0.105f;
+            float fallbackWidth = boardWidth * 0.58f;
+            float fallbackHeight = screenHeight * 0.18f;
             return new Rect((boardWidth - fallbackWidth) * 0.5f, screenHeight * 0.42f, fallbackWidth, fallbackHeight);
         }
 
-        Vector3 lowerLeft = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(-1.61f, -0.61f, 0.22f)));
-        Vector3 upperRight = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(1.61f, 0.51f, 0.22f)));
+        Vector3 lowerLeft = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(-2.4f, -1f, 0.22f)));
+        Vector3 upperRight = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(2.4f, 0.9f, 0.22f)));
         if (lowerLeft.z <= 0f || upperRight.z <= 0f)
         {
-            float fallbackWidth = boardWidth * 0.38f;
-            float fallbackHeight = screenHeight * 0.105f;
+            float fallbackWidth = boardWidth * 0.58f;
+            float fallbackHeight = screenHeight * 0.18f;
             return new Rect((boardWidth - fallbackWidth) * 0.5f, screenHeight * 0.42f, fallbackWidth, fallbackHeight);
         }
 
@@ -1656,39 +2011,76 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void DrawHud(Rect rect)
     {
-        GUI.Box(rect, GUIContent.none, panelStyle);
-        float pad = 14f;
+        Color old = GUI.color;
+        DrawMetalPanel(rect, 3f);
+        float pad = Mathf.Clamp(rect.width * 0.012f, 10f, 24f);
         float unit = (rect.width - pad * 2f) / 5f;
-        GUI.Label(new Rect(rect.x + pad, rect.y + 7f, unit * 1.05f, rect.height - 12f),
+        Rect[] cells =
+        {
+            new Rect(rect.x + pad, rect.y + 7f, unit, rect.height - 14f),
+            new Rect(rect.x + pad + unit, rect.y + 7f, unit, rect.height - 14f),
+            new Rect(rect.x + pad + unit * 2f, rect.y + 7f, unit, rect.height - 14f),
+            new Rect(rect.x + pad + unit * 3f, rect.y + 7f, unit, rect.height - 14f),
+            new Rect(rect.x + pad + unit * 4f, rect.y + 7f, unit, rect.height - 14f)
+        };
+        Color[] iconColors =
+        {
+            new Color(0.15f, 0.72f, 1f), new Color(1f, 0.67f, 0.12f),
+            new Color(0.12f, 0.78f, 1f), new Color(0.75f, 0.24f, 1f),
+            new Color(0.25f, 0.52f, 1f)
+        };
+        string[] icons = { "↻", "¥", "✦", "◆", "★" };
+        for (int i = 0; i < cells.Length; i++)
+        {
+            GUI.color = new Color(0.006f, 0.019f, 0.052f, 0.95f);
+            GUI.DrawTexture(cells[i], Texture2D.whiteTexture);
+            GUI.color = new Color(iconColors[i].r, iconColors[i].g, iconColors[i].b, 0.18f);
+            GUI.DrawTexture(new Rect(cells[i].x, cells[i].y, cells[i].width, cells[i].height), Texture2D.whiteTexture);
+            GUI.color = iconColors[i];
+            GUI.DrawTexture(new Rect(cells[i].x, cells[i].yMax - 2f, cells[i].width, 2f), Texture2D.whiteTexture);
+            float iconSize = Mathf.Min(30f, cells[i].height * 0.62f);
+            Rect iconRect = new Rect(cells[i].x + 8f, cells[i].center.y - iconSize * 0.5f, iconSize, iconSize);
+            GUI.color = new Color(iconColors[i].r, iconColors[i].g, iconColors[i].b, 0.2f);
+            GUI.DrawTexture(new Rect(iconRect.x - 3f, iconRect.y - 3f, iconSize + 6f, iconSize + 6f), GetCelebrationCircle());
+            GUI.color = iconColors[i];
+            GUI.Label(iconRect, icons[i], hudIconStyle);
+        }
+        GUI.color = Color.white;
+        Rect[] valueRects = new Rect[cells.Length];
+        for (int i = 0; i < cells.Length; i++)
+            valueRects[i] = new Rect(cells[i].x + 44f, cells[i].y + 1f, cells[i].width - 48f, cells[i].height - 2f);
+        GUI.Label(valueRects[0],
             $"転生・超越\nLV.{1 + ballValueLevel + launchCountLevel}　連チャン {consecutiveWins}", eyebrowStyle);
-        GUI.Label(new Rect(rect.x + pad + unit * 1.05f, rect.y + 5f, unit * 1.05f, rect.height - 10f),
+        GUI.Label(valueRects[1],
             $"所持金　¥{FormatCurrency(money)}\n玉　∞", statValueStyle);
-        GUI.Label(new Rect(rect.x + pad + unit * 2.2f, rect.y + 10f, unit * 0.9f, rect.height - 16f),
+        GUI.Label(valueRects[2],
             $"転生P  {reincarnationPoints}", sectionStyle);
-        GUI.Label(new Rect(rect.x + pad + unit * 3.15f, rect.y + 10f, unit * 0.8f, rect.height - 16f),
+        GUI.Label(valueRects[3],
             $"超越P  {transcendencePoints}", sectionStyle);
-        GUI.Label(new Rect(rect.x + rect.width - unit * 0.85f, rect.y + 10f, unit * 0.8f, rect.height - 16f),
+        GUI.Label(valueRects[4],
             $"超越強化  {transcendenceIncomeLevel + transcendenceVolleyLevel + transcendenceJackpotLevel}", sectionStyle);
+        GUI.color = old;
     }
 
     private void DrawBoardControls(Rect rect)
     {
-        GUI.Box(rect, GUIContent.none, panelStyle);
-        if (GUI.Button(new Rect(rect.x + 6f, rect.y + 5f, rect.width * 0.43f, rect.height - 10f), "● 発射！", launchButtonStyle))
+        DrawMetalPanel(rect, 3f);
+        float inset = Mathf.Clamp(rect.height * 0.14f, 5f, 9f);
+        if (GUI.Button(new Rect(rect.x + inset, rect.y + inset, rect.width * 0.46f, rect.height - inset * 2f), "▶ 発射！", launchButtonStyle))
         {
             LaunchBatch();
         }
 
-        GUI.Label(new Rect(rect.x + rect.width * 0.47f, rect.y + 8f, rect.width * 0.2f, rect.height - 14f), "玉 ∞", bodyStyle);
-        if (GUI.Button(new Rect(rect.x + rect.width * 0.78f, rect.y + 7f, rect.width * 0.2f, rect.height - 14f),
-            autoLaunch ? "自動発射 ON" : "自動発射 OFF", subButtonStyle)) ToggleAutoLaunch();
+        GUI.Label(new Rect(rect.x + rect.width * 0.48f, rect.y + inset, rect.width * 0.17f, rect.height - inset * 2f), "玉 ∞", sectionStyle);
+        if (GUI.Button(new Rect(rect.x + rect.width * 0.68f, rect.y + inset, rect.width * 0.30f, rect.height - inset * 2f),
+            autoLaunch ? "自動発射 ON　●" : "自動発射 OFF　○", subButtonStyle)) ToggleAutoLaunch();
     }
 
     private void DrawSidePanel(Rect rect)
     {
-        GUI.Box(rect, GUIContent.none, panelStyle);
-        float pad = 10f;
-        float tabY = rect.y + 8f;
+        DrawMetalPanel(rect, 4f);
+        float pad = Mathf.Clamp(rect.width * 0.018f, 8f, 16f);
+        float tabY = rect.y + 12f;
         float tabW = (rect.width - pad * 2f) / 4f;
         string[] tabs = { "強化", "転生", "超越", "記録" };
         for (int i = 0; i < tabs.Length; i++)
@@ -1713,7 +2105,7 @@ public sealed class PachinkoGameController : MonoBehaviour
                 purchaseAmount = amounts[index];
         }
 
-        if (GUI.Button(new Rect(rect.xMax - pad - rect.width * 0.35f, y, rect.width * 0.34f, 28f), autoPurchase ? "自動購入 ON" : "自動購入 OFF", subButtonStyle))
+        if (GUI.Button(new Rect(rect.xMax - pad - rect.width * 0.35f, y, rect.width * 0.34f, 28f), autoPurchase ? "自動購入 ON　●" : "自動購入 OFF　○", subButtonStyle))
         {
             autoPurchase = !autoPurchase;
             if (autoPurchase) nextAutoPurchase = Time.time;
@@ -1733,22 +2125,22 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void DrawUpgradeTab()
     {
-        DrawUpgrade("玉の価値", ballValueLevel, 5, () => ballValueLevel++, "1玉あたりの獲得金額を増やす", $"×{GetBallValueMultiplier():0.0} → ×{1f + (ballValueLevel + 1) * 1f:0.0}", costMultiplier: 1.2f);
+        DrawUpgrade("玉の価値", ballValueLevel, 5, () => ballValueLevel++, "1玉あたりの獲得金額を増やす", $"×{GetBallValueMultiplier():0.0} → ×{2f + ballValueLevel:0.0}", costMultiplier: 1.2f);
         DrawUpgrade("オート発射速度", 2 - autoLaunchInterval, 12, () => autoLaunchInterval = Mathf.Max(1, autoLaunchInterval - 1), autoLaunch ? "自動発射中" : "発射間隔を短縮", autoLaunchInterval > 1 ? $"{autoLaunchInterval}秒 → {autoLaunchInterval - 1}秒" : "最大強化");
         DrawUpgrade("連射", launchCountLevel, 18, () => launchCountLevel++, "1回の発射で出る玉の数", $"{1 + launchCountLevel} → {2 + launchCountLevel}発", maxLevel: 5);
         DrawUpgrade("入賞口強化", categoryLevels[0], 16, () => categoryLevels[0]++, "入賞口の倍率", $"×{1f + categoryLevels[0] * 0.5f:0.0} → ×{1f + (categoryLevels[0] + 1) * 0.5f:0.0}");
         DrawUpgrade("チューリップ強化", categoryLevels[1], 16, () => categoryLevels[1]++, "チューリップの倍率", $"×{1f + categoryLevels[1] * 0.5f:0.0} → ×{1f + (categoryLevels[1] + 1) * 0.5f:0.0}");
         DrawUpgrade("ヘソ拡張", launchPowerLevel, 12, () => launchPowerLevel++, "発射パワーを上げて盤面へ届ける", $"Lv.{launchPowerLevel} → Lv.{launchPowerLevel + 1}");
-        DrawUpgrade("大当たり確率", jackpotLevel, 24, () => jackpotLevel++, "液晶抽選の大当たり確率", $"{JackpotChance:P0} → {Mathf.Min(0.65f, JackpotChance + 0.02f):P0}");
+        DrawUpgrade("大当たり確率", jackpotLevel, 24, () => jackpotLevel++, "液晶抽選の大当たり確率", $"{JackpotChance:P2} → {GetJackpotChance(jackpotLevel + 1):P2}", maxLevel: GetJackpotUpgradeLimit());
         DrawUpgrade("アタッカー倍率", categoryLevels[2], 20, () => categoryLevels[2]++, "アタッカー入賞時の出玉倍率", $"×{1f + categoryLevels[2] * 0.5f:0.0} → ×{1f + (categoryLevels[2] + 1) * 0.5f:0.0}");
-        DrawUpgrade("確変突入率", probabilityChangeLevel, 24, () => probabilityChangeLevel++, "大当たり後に確変へ入りやすくする", $"{KakuhenChance:P0} → {Mathf.Min(0.8f, KakuhenChance + 0.05f):P0}");
+        DrawUpgrade("確変突入率", probabilityChangeLevel, 24, () => probabilityChangeLevel++, "大当たり後にRUSHへ入りやすくする", $"{KakuhenChance:P0} → {GetKakuhenChance(probabilityChangeLevel + 1):P0}", maxLevel: GetKakuhenUpgradeLimit());
     }
 
     private void DrawRebirthTab()
     {
         GUILayout.Label("転生", titleStyle);
         GUILayout.Label("転生すると所持金と通常強化がリセットされます。", bodyStyle);
-        long reincarnationRequirement = GetNextReincarnationRequirement();
+        BigInteger reincarnationRequirement = GetNextReincarnationRequirement();
         DrawProgressBar(runPayout, reincarnationRequirement, $"転生条件　¥{FormatCurrency(runPayout)} / ¥{FormatCurrency(reincarnationRequirement)}");
         int pointsAvailable = CalculateReincarnationPoints(runPayout);
         GUILayout.Label($"今回獲得予定　+{pointsAvailable} ポイント", sectionStyle);
@@ -1822,7 +2214,35 @@ public sealed class PachinkoGameController : MonoBehaviour
             transcendencePoints--;
         }
         GUI.enabled = true;
-        GUILayout.Label($"超越効果：獲得金額 ×{Mathf.Pow(2f, transcendenceIncomeLevel):0} ／ 1回 {1 + launchCountLevel + transcendenceVolleyLevel * 2}発 ／ 大当たり {JackpotChance:P0}", bodyStyle);
+        GUILayout.Label($"超越効果：獲得金額 ×{Mathf.Pow(2f, transcendenceIncomeLevel):0} ／ 1回 {1 + launchCountLevel + transcendenceVolleyLevel * 2 + divineVolleyLevel * 10}発 ／ 大当たり {JackpotChance:P2}", bodyStyle);
+
+        GUILayout.Space(12f);
+        GUILayout.Label("神域スキル　超越を超える力", sectionStyle);
+        GUILayout.Label("超越ポイントを複数消費して、さらに強力な恒久スキルを獲得します。", bodyStyle);
+
+        GUI.enabled = divineIncomeLevel < 5 && transcendencePoints >= 5;
+        if (GUILayout.Button($"神域の富　獲得金額 ×10　Lv.{divineIncomeLevel}/5　（5超越P）", buttonStyle, GUILayout.Height(40f)))
+        {
+            divineIncomeLevel++;
+            transcendencePoints -= 5;
+        }
+
+        GUI.enabled = divineVolleyLevel < 5 && transcendencePoints >= 4;
+        if (GUILayout.Button($"神域の連射　一度に発射 +10玉　Lv.{divineVolleyLevel}/5　（4超越P）", buttonStyle, GUILayout.Height(40f)))
+        {
+            divineVolleyLevel++;
+            transcendencePoints -= 4;
+        }
+
+        int divineJackpotLimit = GetDivineJackpotUpgradeLimit();
+        GUI.enabled = divineJackpotLevel < divineJackpotLimit && transcendencePoints >= 4;
+        if (GUILayout.Button($"神域の幸運　大当たり確率 +10%　Lv.{divineJackpotLevel}/{divineJackpotLimit}　（4超越P）", buttonStyle, GUILayout.Height(40f)))
+        {
+            divineJackpotLevel++;
+            transcendencePoints -= 4;
+        }
+        GUI.enabled = true;
+        GUILayout.Label($"神域効果：獲得金額 ×{Mathf.Pow(10f, divineIncomeLevel):0} ／ 追加発射 {divineVolleyLevel * 10}玉 ／ 神域大当たり強化 {divineJackpotLevel * 10}%", bodyStyle);
     }
 
     private void DrawRecordTab()
@@ -1831,7 +2251,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUILayout.Label($"累計獲得金額　¥{FormatCurrency(lifetimePayout)}", sectionStyle);
         GUILayout.Label($"今回の獲得金額　¥{FormatCurrency(runPayout)}", sectionStyle);
         GUILayout.Label($"盤面上の玉　{activeBalls.Count}", sectionStyle);
-        GUILayout.Label($"大当たり確率　{JackpotChance:P0}\n確変突入率　{KakuhenChance:P0}", bodyStyle);
+        GUILayout.Label($"通常時　1/{1f / JackpotChance:0.0}\nRUSH中　1/{1f / RushJackpotChance:0.0}\nコマチャレンジ　1/{1f / KomaChallengeChance:0.0}\nRUSH突入率　{KakuhenChance:P0}", bodyStyle);
     }
 
     private void DrawUpgrade(string label, int level, int baseCost, System.Action purchase, string description, string change, int maxLevel = -1, float costMultiplier = 1.32f)
@@ -1839,16 +2259,13 @@ public sealed class PachinkoGameController : MonoBehaviour
         int availableLevels = maxLevel >= 0 ? Mathf.Max(0, maxLevel - level) : int.MaxValue;
         int count = Mathf.Min(purchaseAmount, availableLevels);
         bool capped = (label == "オート発射速度" && autoLaunchInterval <= 1)
-            || (label == "大当たり確率" && jackpotLevel >= 22)
-            || (label == "確変突入率" && probabilityChangeLevel >= 14)
             || (maxLevel >= 0 && level >= maxLevel);
-        long CostAtLevel(int targetLevel)
+        BigInteger CostAtLevel(int targetLevel)
         {
-            if (costMultiplier == 1.32f) return UpgradeCost(baseCost, targetLevel);
-            double costAtLevel = baseCost * System.Math.Pow(costMultiplier, System.Math.Max(0, targetLevel));
-            return costAtLevel >= long.MaxValue ? long.MaxValue : System.Math.Max(1L, (long)System.Math.Round(costAtLevel));
+            if (costMultiplier == 1.2f) return GeometricCost(baseCost, targetLevel, 6, 5);
+            return UpgradeCost(baseCost, targetLevel);
         }
-        long cost = 0;
+        BigInteger cost = BigInteger.Zero;
         for (int i = 0; i < count; i++) cost += CostAtLevel(level + i);
         if (purchaseAmount == 100)
         {
@@ -1866,6 +2283,9 @@ public sealed class PachinkoGameController : MonoBehaviour
         bool stackPurchaseButton = availableCardWidth < 520f;
         GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.MinHeight(74f));
         GUILayout.BeginHorizontal();
+        Rect glyphRect = GUILayoutUtility.GetRect(48f, 48f, GUILayout.Width(52f), GUILayout.Height(52f));
+        DrawUpgradeGlyph(glyphRect, label);
+        GUILayout.Space(4f);
         GUILayout.BeginVertical(GUILayout.MinWidth(0f), GUILayout.ExpandWidth(true));
         GUILayout.Label($"{label}　Lv.{level}", sectionStyle, GUILayout.ExpandWidth(true));
         GUILayout.Label(description, bodyStyle, GUILayout.ExpandWidth(true));
@@ -1891,7 +2311,30 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUILayout.EndVertical();
     }
 
-    private void BuyUpgrade(long cost, System.Action purchase, string label)
+    private void DrawUpgradeGlyph(Rect rect, string label)
+    {
+        Color old = GUI.color;
+        Color accent = label == "玉の価値" || label == "大当たり確率" ? new Color(1f, 0.68f, 0.12f)
+            : label.Contains("発射") || label == "連射" ? new Color(0.5f, 0.86f, 1f)
+            : label.Contains("入賞") || label.Contains("ヘソ") ? new Color(0.2f, 0.82f, 1f)
+            : new Color(0.78f, 0.32f, 1f);
+        GUI.color = new Color(accent.r, accent.g, accent.b, 0.2f);
+        GUI.DrawTexture(new Rect(rect.x - 3f, rect.y - 3f, rect.width + 6f, rect.height + 6f), GetCelebrationCircle());
+        GUI.color = new Color(0.48f, 0.28f, 0.1f, 1f);
+        GUI.DrawTexture(rect, Texture2D.whiteTexture);
+        GUI.color = new Color(0.98f, 0.67f, 0.19f, 1f);
+        GUI.DrawTexture(new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, rect.height - 4f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.015f, 0.065f, 0.15f, 1f);
+        GUI.DrawTexture(new Rect(rect.x + 5f, rect.y + 5f, rect.width - 10f, rect.height - 10f), Texture2D.whiteTexture);
+        GUI.color = accent;
+        string mark = label == "玉の価値" ? "●" : label.Contains("発射") ? "▶" : label == "連射" ? "≫"
+            : label.Contains("入賞") ? "◎" : label.Contains("チューリップ") ? "✿" : label.Contains("ヘソ") ? "◇"
+            : label.Contains("確変") ? "♧" : label.Contains("大当たり") ? "★" : "✦";
+        GUI.Label(rect, mark, upgradeGlyphStyle);
+        GUI.color = old;
+    }
+
+    private void BuyUpgrade(BigInteger cost, System.Action purchase, string label)
     {
         if (money < cost)
         {
@@ -1911,15 +2354,17 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void TryAutoPurchase()
     {
-        long bestCost = long.MaxValue;
+        BigInteger bestCost = BigInteger.Zero;
         System.Action bestPurchase = null;
         string bestLabel = "";
         ConsiderAutoUpgrade("玉の価値", BallValueUpgradeCost(ballValueLevel), () => ballValueLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         if (launchCountLevel < 5)
             ConsiderAutoUpgrade("連射", UpgradeCost(18, launchCountLevel), () => launchCountLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         ConsiderAutoUpgrade("発射パワー", UpgradeCost(12, launchPowerLevel), () => launchPowerLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
-        ConsiderAutoUpgrade("大当たり率", UpgradeCost(24, jackpotLevel), () => jackpotLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
-        ConsiderAutoUpgrade("確変率", UpgradeCost(24, probabilityChangeLevel), () => probabilityChangeLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
+        if (jackpotLevel < 22 && GetJackpotChance(jackpotLevel + 1) > JackpotChance)
+            ConsiderAutoUpgrade("大当たり率", UpgradeCost(24, jackpotLevel), () => jackpotLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
+        if (probabilityChangeLevel < GetKakuhenUpgradeLimit() && GetKakuhenChance(probabilityChangeLevel + 1) > KakuhenChance)
+            ConsiderAutoUpgrade("確変率", UpgradeCost(24, probabilityChangeLevel), () => probabilityChangeLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         for (int i = 0; i < categoryLevels.Length; i++)
         {
             int index = i;
@@ -1930,9 +2375,9 @@ public sealed class PachinkoGameController : MonoBehaviour
         if (bestPurchase != null) BuyUpgrade(bestCost, bestPurchase, bestLabel);
     }
 
-    private void ConsiderAutoUpgrade(string label, long cost, System.Action purchase, ref long bestCost, ref System.Action bestPurchase, ref string bestLabel)
+    private void ConsiderAutoUpgrade(string label, BigInteger cost, System.Action purchase, ref BigInteger bestCost, ref System.Action bestPurchase, ref string bestLabel)
     {
-        if (cost <= money && cost < bestCost)
+        if (cost <= money && (bestPurchase == null || cost < bestCost))
         {
             bestCost = cost;
             bestPurchase = purchase;
@@ -1954,9 +2399,16 @@ public sealed class PachinkoGameController : MonoBehaviour
         ClearActiveBalls();
         pendingBalls = 0;
         hesoSpinQueue.Clear();
-        kakuhenBallsRemaining = 0;
+        gameMode = PachinkoMode.Normal;
+        challengeSpinsRemaining = 0;
         consecutiveWins = 0;
         isSpinning = false;
+        lcdChanceUpLevel = 0;
+        lcdMessage = "保留を待っています";
+        lcdStoppedDigits = 0;
+        isLaunchingBatch = false;
+        nextManualLaunch = 0f;
+        nextAutoLaunch = Time.time;
 
         runPayout = 0;
         money = 0;
@@ -1974,18 +2426,16 @@ public sealed class PachinkoGameController : MonoBehaviour
         lastResult = $"転生しました。転生ポイント +{pointsEarned}！";
     }
 
-    private int CalculateReincarnationPoints(long payout)
+    private int CalculateReincarnationPoints(BigInteger payout)
     {
-        long remainingPayout = payout;
-        long nextRequirement = GetNextReincarnationRequirement();
+        BigInteger remainingPayout = payout;
+        BigInteger nextRequirement = GetNextReincarnationRequirement();
         int pointsEarned = 0;
         while (remainingPayout >= nextRequirement)
         {
             remainingPayout -= nextRequirement;
             pointsEarned++;
-            nextRequirement = nextRequirement > long.MaxValue / ReincarnationRequirementMultiplier
-                ? long.MaxValue
-                : nextRequirement * ReincarnationRequirementMultiplier;
+            nextRequirement *= ReincarnationRequirementMultiplier;
         }
         return pointsEarned;
     }
@@ -2020,10 +2470,10 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
     }
 
-    private long GetNextReincarnationRequirement()
+    private BigInteger GetNextReincarnationRequirement()
     {
-        long requirement = ReincarnationBaseRequirement;
-        for (int i = 0; i < reincarnationPoints && requirement < long.MaxValue / ReincarnationRequirementMultiplier; i++)
+        BigInteger requirement = ReincarnationBaseRequirement;
+        for (int i = 0; i < reincarnationPoints; i++)
         {
             requirement *= ReincarnationRequirementMultiplier;
         }
@@ -2040,72 +2490,84 @@ public sealed class PachinkoGameController : MonoBehaviour
         panelStyle = new GUIStyle(GUI.skin.box)
         {
             padding = new RectOffset(16, 16, 14, 14),
-            normal = { background = MakeTexture(new Color(0.025f, 0.045f, 0.09f, 0.97f), new Color(0.18f, 0.55f, 0.72f, 0.9f)) }
+            normal = { background = MakeTexture(new Color(0.018f, 0.055f, 0.14f, 0.99f), new Color(0.2f, 0.78f, 1f, 0.96f)) }
         };
         int scale = Mathf.Clamp(Mathf.RoundToInt(Screen.height / 1080f), 1, 2);
-        eyebrowStyle = new GUIStyle(GUI.skin.label) { fontSize = 16 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.34f, 0.84f, 0.9f) } };
+        eyebrowStyle = new GUIStyle(GUI.skin.label) { fontSize = 16 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.43f, 0.88f, 1f) } };
         titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 32 * scale, fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
-        sectionStyle = new GUIStyle(GUI.skin.label) { fontSize = 23 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.48f, 0.86f, 1f) } };
-        bodyStyle = new GUIStyle(GUI.skin.label) { fontSize = 18 * scale, wordWrap = true, normal = { textColor = new Color(0.78f, 0.84f, 0.93f) } };
+        sectionStyle = new GUIStyle(GUI.skin.label) { fontSize = 23 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.67f, 0.91f, 1f) } };
+        hudIconStyle = new GUIStyle(sectionStyle) { fontSize = 22 * scale, alignment = TextAnchor.MiddleCenter, normal = { textColor = Color.white } };
+        upgradeGlyphStyle = new GUIStyle(sectionStyle) { fontSize = 27 * scale, alignment = TextAnchor.MiddleCenter, normal = { textColor = Color.white } };
+        bodyStyle = new GUIStyle(GUI.skin.label) { fontSize = 18 * scale, wordWrap = true, normal = { textColor = new Color(0.91f, 0.95f, 1f) } };
         statLabelStyle = new GUIStyle(bodyStyle) { fontSize = 18 * scale, alignment = TextAnchor.MiddleLeft };
-        statValueStyle = new GUIStyle(GUI.skin.label) { fontSize = 22 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.82f, 0.33f) } };
+        statValueStyle = new GUIStyle(GUI.skin.label) { fontSize = 22 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.76f, 0.18f) } };
         resultStyle = new GUIStyle(GUI.skin.label) { fontSize = 20 * scale, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, wordWrap = true, normal = { textColor = Color.white } };
-        hesoLabelStyle = new GUIStyle(sectionStyle) { alignment = TextAnchor.MiddleCenter, normal = { textColor = new Color(1f, 0.78f, 0.26f) } };
-        buttonStyle = MakeButtonStyle(new Color(0.12f, 0.32f, 0.47f), new Color(0.17f, 0.43f, 0.6f));
-        launchButtonStyle = MakeButtonStyle(new Color(0.04f, 0.48f, 0.58f), new Color(0.06f, 0.64f, 0.69f));
+        hesoLabelStyle = new GUIStyle(sectionStyle) { alignment = TextAnchor.MiddleCenter, normal = { textColor = new Color(1f, 0.78f, 0.24f) } };
+        buttonStyle = MakeButtonStyle(new Color(0.035f, 0.19f, 0.43f), new Color(0.07f, 0.42f, 0.8f));
+        launchButtonStyle = MakeButtonStyle(new Color(0.025f, 0.34f, 0.82f), new Color(0.03f, 0.58f, 1f));
         launchButtonStyle.fontSize = 30 * scale;
         buttonStyle.fontSize = 20 * scale;
-        subButtonStyle = MakeButtonStyle(new Color(0.13f, 0.2f, 0.31f), new Color(0.17f, 0.32f, 0.44f));
+        subButtonStyle = MakeButtonStyle(new Color(0.018f, 0.07f, 0.17f), new Color(0.04f, 0.23f, 0.48f));
         subButtonStyle.fontSize = 18 * scale;
         cardStyle = new GUIStyle(GUI.skin.box)
         {
-            padding = new RectOffset(10, 10, 7, 7),
-            margin = new RectOffset(0, 0, 3, 3),
-            normal = { background = MakeTexture(new Color(0.055f, 0.09f, 0.16f, 0.98f), new Color(0.12f, 0.2f, 0.29f, 0.9f)) }
+            padding = new RectOffset(12, 10, 8, 8),
+            margin = new RectOffset(0, 0, 4, 4),
+            normal = { background = MakeTexture(new Color(0.025f, 0.07f, 0.16f, 0.99f), new Color(0.91f, 0.58f, 0.16f, 0.96f)) }
         };
     }
 
-    private static long UpgradeCost(int baseCost, int level)
+    private static BigInteger UpgradeCost(int baseCost, int level)
     {
-        double cost = baseCost * System.Math.Pow(1.32d, System.Math.Max(0, level));
-        if (double.IsInfinity(cost) || cost >= long.MaxValue) return long.MaxValue;
-        return System.Math.Max(1L, (long)System.Math.Round(cost));
+        return GeometricCost(baseCost, level, 132, 100);
     }
 
     private float GetBallValueMultiplier() => 1f + ballValueLevel;
 
-    private static long BallValueUpgradeCost(int level)
+    private static BigInteger BallValueUpgradeCost(int level)
     {
-        double cost = 5d * System.Math.Pow(1.2d, System.Math.Max(0, level));
-        if (double.IsInfinity(cost) || cost >= long.MaxValue) return long.MaxValue;
-        return System.Math.Max(1L, (long)System.Math.Round(cost));
+        return GeometricCost(5, level, 6, 5);
     }
 
-    private long AutoIntervalCost => UpgradeCost(12, 2 - autoLaunchInterval);
+    private static BigInteger GeometricCost(int baseCost, int level, int numerator, int denominator)
+    {
+        int safeLevel = System.Math.Max(0, level);
+        BigInteger numeratorValue = (BigInteger)baseCost * BigInteger.Pow(numerator, safeLevel);
+        BigInteger denominatorValue = BigInteger.Pow(denominator, safeLevel);
+        BigInteger rounded = (numeratorValue + denominatorValue / 2) / denominatorValue;
+        return BigInteger.Max(BigInteger.One, rounded);
+    }
 
-    private void DrawProgressBar(long value, long target, string label)
+    private BigInteger AutoIntervalCost => UpgradeCost(12, 2 - autoLaunchInterval);
+
+    private void DrawProgressBar(BigInteger value, BigInteger target, string label)
     {
         GUILayout.Label(label, bodyStyle);
         Rect rect = GUILayoutUtility.GetRect(1f, 24f, GUILayout.ExpandWidth(true));
         GUI.color = new Color(0.09f, 0.14f, 0.2f);
         GUI.DrawTexture(rect, Texture2D.whiteTexture);
         GUI.color = new Color(0.95f, 0.68f, 0.2f);
-        rect.width *= Mathf.Clamp01((float)value / target);
+        int progressBasisPoints = target <= BigInteger.Zero ? 10000 : value >= target ? 10000 : (int)(value * 10000 / target);
+        rect.width *= progressBasisPoints / 10000f;
         GUI.DrawTexture(rect, Texture2D.whiteTexture);
         GUI.color = Color.white;
     }
 
     private static GUIStyle MakeButtonStyle(Color normalColor, Color hoverColor)
     {
+        Color edge = normalColor.b > normalColor.r * 1.2f
+            ? new Color(0.42f, 0.78f, 1f, 1f)
+            : new Color(1f, 0.65f, 0.18f, 1f);
         GUIStyle style = new GUIStyle(GUI.skin.button)
         {
             fontSize = 14,
             fontStyle = FontStyle.Bold,
             wordWrap = true,
-            normal = { background = MakeTexture(normalColor), textColor = Color.white },
-            hover = { background = MakeTexture(hoverColor), textColor = Color.white },
-            active = { background = MakeTexture(hoverColor * 0.85f), textColor = Color.white },
-            focused = { background = MakeTexture(normalColor), textColor = Color.white }
+            border = new RectOffset(5, 5, 5, 5),
+            normal = { background = MakeTexture(normalColor, edge), textColor = Color.white },
+            hover = { background = MakeTexture(hoverColor, new Color(1f, 0.9f, 0.5f, 1f)), textColor = Color.white },
+            active = { background = MakeTexture(hoverColor * 0.85f, edge), textColor = Color.white },
+            focused = { background = MakeTexture(normalColor, edge), textColor = Color.white }
         };
         return style;
     }

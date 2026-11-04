@@ -46,6 +46,9 @@ public class PinSpawner3D : MonoBehaviour
             float y = 4.05f - row * 0.5f;
             foreach (float x in PinRows[row])
             {
+                // Keep the enlarged center LCD clear, including a small margin around its bezel.
+                if (y > -1.3f && y < 1.2f && Mathf.Abs(x) < 2.65f) continue;
+
                 // Keep a narrow route clear along the left wall so the ball reaches
                 // the top before it meets the upper-left pins on its way back down.
                 float launchLaneX = -3.05f + (y + 3.52f) * 0.03f;

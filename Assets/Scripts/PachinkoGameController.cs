@@ -4,9 +4,51 @@ using System.Globalization;
 using BigInteger = System.Numerics.BigInteger;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
 public sealed class PachinkoGameController : MonoBehaviour
 {
+    private static bool hasTitleLaunchRequest;
+    private static int requestedSaveSlot = -1;
+    private static bool requestedNewGame;
+
+    [System.Serializable]
+    private sealed class SaveData
+    {
+        public int version = 1;
+        public string money = "0";
+        public string lifetimePayout = "0";
+        public string runPayout = "0";
+        public int ballValueLevel;
+        public int launchCountLevel;
+        // Legacy save field; old launch power levels migrate to heso expansion.
+        public int launchPowerLevel;
+        public int hesoExpansionLevel;
+        public int jackpotLevel;
+        public int probabilityChangeLevel;
+        public int autoLaunchInterval = 2;
+        public bool autoLaunch = true;
+        public bool autoPurchase;
+        public int gameMode;
+        public int challengeSpinsRemaining;
+        public int consecutiveWins;
+        public int reincarnationPoints;
+        public int transcendencePoints;
+        public int reincarnationUpgradeLevel;
+        public int reincarnationLaunchSpeedLevel;
+        public int jackpotMemoryUpgradeLevel;
+        public int holdCapacityUpgradeLevel;
+        public int transcendenceIncomeLevel;
+        public int transcendenceVolleyLevel;
+        public int transcendenceJackpotLevel;
+        public int divineIncomeLevel;
+        public int divineVolleyLevel;
+        public int divineJackpotLevel;
+        public int categoryIncomeLevel;
+        public int categoryTulipLevel;
+        public int categoryAttackerLevel;
+    }
+
     private enum PachinkoMode
     {
         Normal,
@@ -31,11 +73,19 @@ public sealed class PachinkoGameController : MonoBehaviour
     [SerializeField] private int autoLaunchInterval = 2;
 
     private readonly HashSet<PachinkoBall> activeBalls = new HashSet<PachinkoBall>();
+    private readonly SaveData[] saveSlots = new SaveData[3];
     private readonly List<Transform> aquariumFish = new List<Transform>();
     private readonly List<Vector3> aquariumFishHomes = new List<Vector3>();
     private readonly List<float> aquariumFishSpeeds = new List<float>();
     private readonly int[] lanePayouts = { 1, 2, 3, 8, 3, 2, 1 };
     private readonly string[] laneNames = { "入賞口", "チューリップ", "アタッカー", "ヘソ抽選", "アタッカー", "チューリップ", "入賞口" };
+    private static readonly string[] PrizeLaneLabels = { "入賞口", "チューリップ", "アタッカー", "ヘソ抽選", "アタッカー", "チューリップ", "入賞口" };
+    private static readonly Color[] PrizeLaneLabelColors =
+    {
+        new Color(0.18f, 0.66f, 1f), new Color(0.12f, 0.9f, 0.72f), new Color(1f, 0.53f, 0.18f),
+        new Color(1f, 0.78f, 0.2f), new Color(1f, 0.53f, 0.18f), new Color(0.12f, 0.9f, 0.72f),
+        new Color(0.18f, 0.66f, 1f)
+    };
     private readonly int[] categoryLevels = new int[3];
 
     private BigInteger money;
@@ -43,7 +93,7 @@ public sealed class PachinkoGameController : MonoBehaviour
     private BigInteger runPayout;
     private int ballValueLevel;
     private int launchCountLevel;
-    private int launchPowerLevel;
+    private int hesoExpansionLevel;
     private int jackpotLevel;
     private int probabilityChangeLevel;
     private bool autoLaunch = true;
@@ -92,6 +142,9 @@ public sealed class PachinkoGameController : MonoBehaviour
     private int divineJackpotLevel;
     private int currentTab;
     private int purchaseAmount = 1;
+    private bool showTitleScreen = true;
+    private int activeSaveSlot = -1;
+    private int pendingDeleteSlot = -1;
     private string lastResult = "スペースキーまたは「玉を打つ」で発射";
     private AudioSource soundSource;
     private AudioSource jackpotSoundSource;
@@ -118,12 +171,21 @@ public sealed class PachinkoGameController : MonoBehaviour
     private GUIStyle subButtonStyle;
     private GUIStyle hudIconStyle;
     private GUIStyle upgradeGlyphStyle;
+    private GUIStyle prizeLaneLabelStyle;
+    private GUIStyle saveSlotTitleStyle;
+    private GUIStyle saveSlotInfoStyle;
     private Vector2 scrollPosition;
     private Transform shooterPusher;
     private bool shooterAnimating;
 
     private void Start()
     {
+        if (SceneManager.GetActiveScene().name == "PachinkoPrototype" && !hasTitleLaunchRequest)
+        {
+            SceneManager.LoadScene("TitleScreen");
+            return;
+        }
+
         InitializeAudio();
         EnsureCabinetVisuals();
         EnsureCabinetCrown();
@@ -133,6 +195,17 @@ public sealed class PachinkoGameController : MonoBehaviour
         EnsureShooterVisual();
         EnsureOuterWallColliders();
         EnsureHesoVisual();
+        RefreshSaveSlotCache();
+        if (hasTitleLaunchRequest)
+        {
+            int slot = requestedSaveSlot;
+            bool startNew = requestedNewGame;
+            hasTitleLaunchRequest = false;
+            requestedSaveSlot = -1;
+            if (startNew) StartNewGame(slot);
+            else LoadSaveSlot(slot);
+        }
+        else showTitleScreen = true;
         if (ballPrefab == null)
         {
             Debug.LogError("PachinkoGameController: Ball Prefab が設定されていません。", this);
@@ -142,6 +215,13 @@ public sealed class PachinkoGameController : MonoBehaviour
         {
             Debug.LogError("PachinkoGameController: Launch Point が設定されていません。", this);
         }
+    }
+
+    public static void RequestTitleLaunch(int slot, bool startNew)
+    {
+        requestedSaveSlot = Mathf.Clamp(slot, 0, 2);
+        requestedNewGame = startNew;
+        hasTitleLaunchRequest = true;
     }
 
     private void EnsureCabinetVisuals()
@@ -211,8 +291,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         for (int i = 0; i < outline.Length; i++) innerOutline[i] = outline[i] * 0.96f;
         CreateCabinetContour("Inner Blue Pin Guide", innerOutline, 0.07f, 0.18f, blue);
 
-        CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(5.12f, 2.22f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
-        GameObject screen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(4.8f, 1.9f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
+        CreateCabinetCube("LCD Bezel", new Vector3(0f, -0.05f, 0.34f), new Vector3(5.92f, 2.62f, 0.18f), CreateVisualMaterial("Pachinko LCD Frame", new Color(0.05f, 0.16f, 0.23f)));
+        GameObject screen = CreateCabinetCube("LCD Screen", new Vector3(0f, -0.05f, 0.22f), new Vector3(5.6f, 2.3f, 0.08f), CreateVisualMaterial("Pachinko LCD Glass", new Color(0.015f, 0.06f, 0.12f)));
         screen.GetComponent<Collider>().enabled = false;
         CreateCabinetOrnaments(brass, blue);
         PositionLCDParts();
@@ -225,13 +305,13 @@ public sealed class PachinkoGameController : MonoBehaviour
         if (bezel != null)
         {
             bezel.localPosition = new Vector3(0f, -0.05f, 0.34f);
-            bezel.localScale = new Vector3(5.12f, 2.22f, 0.18f);
+            bezel.localScale = new Vector3(5.92f, 2.62f, 0.18f);
         }
         Transform screen = transform.Find("LCD Screen");
         if (screen != null)
         {
             screen.localPosition = new Vector3(0f, -0.05f, 0.22f);
-            screen.localScale = new Vector3(4.8f, 1.9f, 0.08f);
+            screen.localScale = new Vector3(5.6f, 2.3f, 0.08f);
         }
     }
 
@@ -533,17 +613,34 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void EnsureHesoVisual()
     {
-        if (transform.Find("Heso Visual") != null) return;
+        Transform root = transform.Find("Heso Visual");
+        if (root == null)
+        {
+            GameObject visual = new GameObject("Heso Visual");
+            visual.transform.SetParent(transform, false);
+            visual.transform.localPosition = new Vector3(0f, -1.45f, 0f);
+            Material gold = CreateVisualMaterial("Heso Gold", new Color(1f, 0.66f, 0.12f));
+            Material cyan = CreateVisualMaterial("Heso Cyan", new Color(0.12f, 0.8f, 1f));
+            CreateHesoPart(visual.transform, "Heso left guide", new Vector3(-0.58f, 0f, 0.18f), new Vector3(0.16f, 0.32f, 0.12f), gold);
+            CreateHesoPart(visual.transform, "Heso right guide", new Vector3(0.58f, 0f, 0.18f), new Vector3(0.16f, 0.32f, 0.12f), gold);
+            CreateHesoPart(visual.transform, "Heso lower lip", new Vector3(0f, -0.18f, 0.18f), new Vector3(1.08f, 0.08f, 0.12f), cyan);
+            CreateHesoPart(visual.transform, "Heso indicator", new Vector3(0f, 0.22f, 0.18f), new Vector3(0.55f, 0.07f, 0.12f), gold);
+            root = visual.transform;
+        }
 
-        GameObject root = new GameObject("Heso Visual");
-        root.transform.SetParent(transform, false);
-        root.transform.localPosition = new Vector3(0f, -1.45f, 0f);
-        Material gold = CreateVisualMaterial("Heso Gold", new Color(1f, 0.66f, 0.12f));
-        Material cyan = CreateVisualMaterial("Heso Cyan", new Color(0.12f, 0.8f, 1f));
-        CreateHesoPart(root.transform, "Heso left guide", new Vector3(-0.58f, 0f, 0.18f), new Vector3(0.16f, 0.32f, 0.12f), gold);
-        CreateHesoPart(root.transform, "Heso right guide", new Vector3(0.58f, 0f, 0.18f), new Vector3(0.16f, 0.32f, 0.12f), gold);
-        CreateHesoPart(root.transform, "Heso lower lip", new Vector3(0f, -0.18f, 0.18f), new Vector3(1.08f, 0.08f, 0.12f), cyan);
-        CreateHesoPart(root.transform, "Heso indicator", new Vector3(0f, 0.22f, 0.18f), new Vector3(0.55f, 0.07f, 0.12f), gold);
+        float halfWidth = 0.58f + hesoExpansionLevel * 0.05f;
+        Transform leftGuide = root.Find("Heso left guide");
+        Transform rightGuide = root.Find("Heso right guide");
+        Transform lowerLip = root.Find("Heso lower lip");
+        Transform indicator = root.Find("Heso indicator");
+        if (leftGuide != null) leftGuide.localPosition = new Vector3(-halfWidth, 0f, 0.18f);
+        if (rightGuide != null) rightGuide.localPosition = new Vector3(halfWidth, 0f, 0.18f);
+        if (lowerLip != null) lowerLip.localScale = new Vector3(1.08f + hesoExpansionLevel * 0.1f, 0.08f, 0.12f);
+        if (indicator != null) indicator.localScale = new Vector3(0.55f + hesoExpansionLevel * 0.1f, 0.07f, 0.12f);
+        Transform trigger = transform.Find("Heso - Hold Trigger");
+        BoxCollider triggerCollider = trigger != null ? trigger.GetComponent<BoxCollider>() : null;
+        if (triggerCollider != null)
+            triggerCollider.size = new Vector3(1.15f + hesoExpansionLevel * 0.1f, 0.42f, 0.8f);
     }
 
     private static Material CreateVisualMaterial(string materialName, Color color)
@@ -630,6 +727,8 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private void Update()
     {
+        if (showTitleScreen) return;
+
         if (isSpinning && Time.time >= nextLcdDigitAt)
         {
             RollLcdDigits();
@@ -956,10 +1055,12 @@ public sealed class PachinkoGameController : MonoBehaviour
         body.constraints = RigidbodyConstraints.FreezePositionZ
             | RigidbodyConstraints.FreezeRotationX
             | RigidbodyConstraints.FreezeRotationY;
-        body.isKinematic = false;
-        body.useGravity = true;
+        body.isKinematic = true;
+        body.useGravity = false;
         body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
         body.interpolation = RigidbodyInterpolation.Interpolate;
+        Collider ballCollider = instance.GetComponent<Collider>();
+        if (ballCollider != null) ballCollider.enabled = false;
 
         PachinkoBall ball = instance.GetComponent<PachinkoBall>();
         if (ball == null)
@@ -968,15 +1069,40 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
 
         activeBalls.Add(ball);
-        float startY = transform.InverseTransformPoint(launchPoint.position).y;
-        float apexY = Mathf.Min(4.45f, 4.35f + launchPowerLevel * 0.02f);
-        float targetHeight = Mathf.Max(0.1f, apexY - startY);
-        // Leave enough energy to reach the dome even after small contacts near
-        // the lower guide. The lane is kept clear until the ball reaches the top.
-        float verticalSpeed = Mathf.Sqrt(2f * Mathf.Abs(Physics.gravity.y) * targetHeight) * 1.3f
-            + launchPowerLevel * 0.1f;
-        float horizontalSpeed = verticalSpeed * Random.Range(0.015f, 0.04f) + Random.Range(-0.08f, 0.08f);
-        body.linearVelocity = new Vector3(horizontalSpeed, verticalSpeed * Random.Range(0.97f, 1f), 0f);
+        StartCoroutine(GuideBallToUpperDrop(body, ballCollider));
+    }
+
+    private IEnumerator GuideBallToUpperDrop(Rigidbody body, Collider ballCollider)
+    {
+        // Invisible launcher channel: climb the inside of the left rail, then
+        // bend inward near the crown before returning the ball to physics.
+        Vector3 start = new Vector3(-3.05f + Random.Range(-0.025f, 0.025f), -3.52f, 0.16f);
+        Vector3 controlA = new Vector3(-3.3f, -0.85f, 0.16f);
+        Vector3 controlB = new Vector3(-3.1f, 2.75f, 0.16f);
+        Vector3 release = new Vector3(-1.8f + Random.Range(-0.08f, 0.08f), 4.25f, 0.16f);
+        const float guideDuration = 0.82f;
+        float elapsed = 0f;
+
+        while (elapsed < guideDuration && body != null)
+        {
+            float t = Mathf.Clamp01(elapsed / guideDuration);
+            float oneMinusT = 1f - t;
+            Vector3 localPosition = oneMinusT * oneMinusT * oneMinusT * start
+                + 3f * oneMinusT * oneMinusT * t * controlA
+                + 3f * oneMinusT * t * t * controlB
+                + t * t * t * release;
+            body.MovePosition(transform.TransformPoint(localPosition));
+            elapsed += Time.fixedDeltaTime;
+            yield return new WaitForFixedUpdate();
+        }
+
+        if (body == null) yield break;
+        body.position = transform.TransformPoint(release);
+        if (ballCollider != null) ballCollider.enabled = true;
+        body.isKinematic = false;
+        body.useGravity = true;
+        body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        body.linearVelocity = transform.TransformDirection(new Vector3(0.65f, -0.45f, 0f));
     }
 
     public void AwardPayout(PachinkoBall ball, int laneIndex, string gateName)
@@ -1279,7 +1405,35 @@ public sealed class PachinkoGameController : MonoBehaviour
 
     private static string FormatCurrency(BigInteger amount)
     {
-        return amount.ToString("N0", CultureInfo.InvariantCulture);
+        if (amount < 1_000_000_000_000L)
+            return amount.ToString("N0", CultureInfo.InvariantCulture);
+
+        string[] units = { "", "万", "億", "兆", "京", "垓", "秭", "穣", "溝", "澗", "正", "載", "極", "恒河沙", "阿僧祇", "那由他", "不可思議", "無量大数" };
+        var groups = new List<int>();
+        BigInteger remaining = amount;
+        BigInteger groupBase = new BigInteger(10000);
+        while (remaining > BigInteger.Zero)
+        {
+            remaining = BigInteger.DivRem(remaining, groupBase, out BigInteger remainder);
+            groups.Add((int)remainder);
+        }
+
+        if (groups.Count > units.Length)
+        {
+            string digits = amount.ToString(CultureInfo.InvariantCulture);
+            string leading = digits.Length <= 4 ? digits : digits.Substring(0, 4);
+            string mantissa = leading.Length == 1 ? leading : leading[0] + "." + leading.Substring(1);
+            return mantissa + "×10^" + (digits.Length - 1).ToString(CultureInfo.InvariantCulture);
+        }
+
+        var formatted = new System.Text.StringBuilder();
+        for (int i = groups.Count - 1; i >= 0; i--)
+        {
+            if (groups[i] == 0) continue;
+            formatted.Append(groups[i].ToString(CultureInfo.InvariantCulture));
+            formatted.Append(units[i]);
+        }
+        return formatted.ToString();
     }
 
     private static string FormatMultiplier(double multiplier)
@@ -1321,6 +1475,11 @@ public sealed class PachinkoGameController : MonoBehaviour
     private void OnGUI()
     {
         EnsureStyles();
+        if (showTitleScreen)
+        {
+            DrawTitleScreen();
+            return;
+        }
         float w = Screen.width;
         float h = Screen.height;
         float top = Mathf.Clamp(h * 0.09f, 62f, 92f);
@@ -1330,11 +1489,318 @@ public sealed class PachinkoGameController : MonoBehaviour
         DrawPlayfieldFrame(new Rect(4f, top + 3f, boardWidth - 8f, h - top - 80f));
         Rect lcdRect = GetLCDScreenRect(boardWidth, h);
         DrawLCD(lcdRect);
-        float hesoLabelY = Mathf.Min(lcdRect.yMax + 2f, h - 112f);
-        GUI.Label(new Rect(boardWidth * 0.32f, hesoLabelY, boardWidth * 0.36f, 30f), "▼　ヘソ　保留 +1　▼", hesoLabelStyle);
+        float hesoLabelY = lcdRect.yMax + 10f;
+        const float hesoLabelHeight = 28f;
+        // Keep the heso caption below the LCD; hide it when the board has no room
+        // instead of clamping it upward over the LCD text.
+        if (hesoLabelY + hesoLabelHeight <= h - 112f)
+        {
+            Rect hesoLabelRect = GetHesoLabelRect(boardWidth, hesoLabelY, hesoLabelHeight);
+            Color oldHesoColor = GUI.color;
+            GUI.color = new Color(0.012f, 0.045f, 0.12f, 0.96f);
+            GUI.DrawTexture(hesoLabelRect, Texture2D.whiteTexture);
+            GUI.color = new Color(0.12f, 0.72f, 0.95f, 0.95f);
+            GUI.DrawTexture(new Rect(hesoLabelRect.x, hesoLabelRect.y, hesoLabelRect.width, 2f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(hesoLabelRect.x, hesoLabelRect.yMax - 2f, hesoLabelRect.width, 2f), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUIStyle hesoCaption = new GUIStyle(hesoLabelStyle)
+            {
+                fontSize = Mathf.Clamp(Mathf.RoundToInt(hesoLabelRect.width * 0.15f), 10, 22),
+                clipping = TextClipping.Clip,
+                wordWrap = false
+            };
+            GUI.Label(hesoLabelRect, "ヘソ入賞口", hesoCaption);
+            GUI.color = oldHesoColor;
+        }
+        DrawPrizeLaneLabels();
         DrawBoardControls(new Rect(8f, h - 76f, boardWidth - 16f, 68f));
+        if (showTitleScreen) return;
         DrawSidePanel(new Rect(boardWidth + 6f, top + 4f, w - boardWidth - 10f, h - top - 10f));
         if (Time.time < jackpotFlashUntil) DrawJackpotCelebration(boardWidth, h);
+    }
+
+    private void DrawTitleScreen()
+    {
+        DrawCabinetBackdrop(Screen.width, Screen.height);
+        Color old = GUI.color;
+        GUI.color = new Color(0.005f, 0.018f, 0.06f, 0.78f);
+        GUI.DrawTexture(new Rect(0f, 0f, Screen.width, Screen.height), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+
+        float panelWidth = Mathf.Min(Screen.width * 0.78f, 1120f);
+        float panelHeight = Mathf.Min(Screen.height * 0.84f, 880f);
+        Rect panel = new Rect((Screen.width - panelWidth) * 0.5f, (Screen.height - panelHeight) * 0.5f, panelWidth, panelHeight);
+        DrawMetalPanel(panel, 7f);
+
+        Rect titleRect = new Rect(panel.x + 24f, panel.y + panel.height * 0.045f, panel.width - 48f, panel.height * 0.09f);
+        GUIStyle title = new GUIStyle(titleStyle)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(panelHeight * 0.07f), 30, 68),
+            alignment = TextAnchor.MiddleCenter,
+            normal = { textColor = new Color(0.78f, 0.94f, 1f) }
+        };
+        DrawOutlinedCelebrationLabel(titleRect, "PACHINKO  EVOLUTION", title, new Color(0.02f, 0.46f, 1f), 2f);
+        GUIStyle subtitle = new GUIStyle(sectionStyle)
+        {
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(panelHeight * 0.027f), 14, 26),
+            alignment = TextAnchor.MiddleCenter
+        };
+        GUI.Label(new Rect(panel.x + 24f, titleRect.yMax + 2f, panel.width - 48f, panel.height * 0.055f), "転生・超越パチンコ", subtitle);
+
+        float pad = Mathf.Clamp(panelWidth * 0.035f, 22f, 42f);
+        float rowTop = panel.y + panel.height * 0.205f;
+        float rowGap = Mathf.Clamp(panelHeight * 0.018f, 10f, 18f);
+        float rowHeight = (panel.yMax - pad - rowTop - rowGap * 2f) / 3f;
+        for (int i = 0; i < saveSlots.Length; i++)
+        {
+            Rect row = new Rect(panel.x + pad, rowTop + i * (rowHeight + rowGap), panel.width - pad * 2f, rowHeight);
+            DrawMetalPanel(row, 3f);
+            Rect textRect = new Rect(row.x + 16f, row.y + 7f, row.width * 0.52f, row.height - 14f);
+            GUI.Label(new Rect(textRect.x, textRect.y, textRect.width, textRect.height * 0.42f), $"セーブスロット {i + 1}", saveSlotTitleStyle);
+
+            SaveData data = saveSlots[i];
+            if (data == null)
+            {
+                GUI.Label(new Rect(textRect.x, textRect.y + textRect.height * 0.42f, textRect.width, textRect.height * 0.5f), "空きスロット", saveSlotInfoStyle);
+                Rect startButton = new Rect(row.xMax - 220f, row.center.y - 28f, 196f, 56f);
+                if (GUI.Button(startButton, "新しくはじめる", launchButtonStyle)) StartNewGame(i);
+            }
+            else
+            {
+                string savedMoney = FormatSavedMoney(data.money);
+                string summary = $"所持金 ¥{savedMoney}　 転生P {data.reincarnationPoints}　 超越P {data.transcendencePoints}";
+                GUI.Label(new Rect(textRect.x, textRect.y + textRect.height * 0.42f, textRect.width, textRect.height * 0.5f), summary, saveSlotInfoStyle);
+                Rect continueButton = new Rect(row.xMax - 350f, row.center.y - 28f, 198f, 56f);
+                Rect deleteButton = new Rect(row.xMax - 138f, row.center.y - 28f, 118f, 56f);
+                if (GUI.Button(continueButton, "つづきから", launchButtonStyle)) LoadSaveSlot(i);
+                if (GUI.Button(deleteButton, "削除", subButtonStyle)) pendingDeleteSlot = i;
+            }
+        }
+
+        if (pendingDeleteSlot >= 0) DrawDeleteSaveConfirmation(panel);
+        GUI.color = old;
+    }
+
+    private void DrawDeleteSaveConfirmation(Rect parentPanel)
+    {
+        Color old = GUI.color;
+        GUI.color = new Color(0f, 0.005f, 0.025f, 0.72f);
+        GUI.DrawTexture(new Rect(0f, 0f, Screen.width, Screen.height), Texture2D.whiteTexture);
+        float width = Mathf.Min(parentPanel.width * 0.68f, 620f);
+        float height = Mathf.Clamp(parentPanel.height * 0.31f, 190f, 270f);
+        Rect modal = new Rect((Screen.width - width) * 0.5f, (Screen.height - height) * 0.5f, width, height);
+        DrawMetalPanel(modal, 5f);
+        GUI.Label(new Rect(modal.x + 20f, modal.y + 20f, modal.width - 40f, 54f), "セーブデータを削除しますか？", saveSlotTitleStyle);
+        GUI.Label(new Rect(modal.x + 20f, modal.y + 78f, modal.width - 40f, 42f), $"スロット {pendingDeleteSlot + 1} のデータは元に戻せません。", resultStyle);
+        float buttonWidth = Mathf.Min(220f, (modal.width - 64f) * 0.5f);
+        float buttonY = modal.yMax - 68f;
+        if (GUI.Button(new Rect(modal.center.x - buttonWidth - 8f, buttonY, buttonWidth, 48f), "削除する", launchButtonStyle))
+            DeleteSaveSlot(pendingDeleteSlot);
+        if (GUI.Button(new Rect(modal.center.x + 8f, buttonY, buttonWidth, 48f), "キャンセル", subButtonStyle))
+            pendingDeleteSlot = -1;
+        GUI.color = old;
+    }
+
+    private void RefreshSaveSlotCache()
+    {
+        for (int i = 0; i < saveSlots.Length; i++)
+        {
+            string json = PlayerPrefs.GetString(GetSaveSlotKey(i), string.Empty);
+            if (string.IsNullOrEmpty(json))
+            {
+                saveSlots[i] = null;
+                continue;
+            }
+            try
+            {
+                SaveData data = JsonUtility.FromJson<SaveData>(json);
+                saveSlots[i] = data != null && data.version == 1 ? data : null;
+            }
+            catch
+            {
+                saveSlots[i] = null;
+            }
+        }
+    }
+
+    private static string GetSaveSlotKey(int slot) => "PachinkoSaveSlot_" + slot;
+
+    private static string FormatSavedMoney(string value)
+    {
+        if (BigInteger.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out BigInteger amount))
+            return FormatCurrency(BigInteger.Max(BigInteger.Zero, amount));
+        return "0";
+    }
+
+    private void SaveActiveSlot()
+    {
+        if (activeSaveSlot < 0 || activeSaveSlot >= saveSlots.Length) return;
+        SaveData data = new SaveData
+        {
+            money = money.ToString(CultureInfo.InvariantCulture),
+            lifetimePayout = lifetimePayout.ToString(CultureInfo.InvariantCulture),
+            runPayout = runPayout.ToString(CultureInfo.InvariantCulture),
+            ballValueLevel = ballValueLevel,
+            launchCountLevel = launchCountLevel,
+            launchPowerLevel = hesoExpansionLevel,
+            hesoExpansionLevel = hesoExpansionLevel,
+            jackpotLevel = jackpotLevel,
+            probabilityChangeLevel = probabilityChangeLevel,
+            autoLaunchInterval = autoLaunchInterval,
+            autoLaunch = autoLaunch,
+            autoPurchase = autoPurchase,
+            gameMode = (int)gameMode,
+            challengeSpinsRemaining = challengeSpinsRemaining,
+            consecutiveWins = consecutiveWins,
+            reincarnationPoints = reincarnationPoints,
+            transcendencePoints = transcendencePoints,
+            reincarnationUpgradeLevel = reincarnationUpgradeLevel,
+            reincarnationLaunchSpeedLevel = reincarnationLaunchSpeedLevel,
+            jackpotMemoryUpgradeLevel = jackpotMemoryUpgradeLevel,
+            holdCapacityUpgradeLevel = holdCapacityUpgradeLevel,
+            transcendenceIncomeLevel = transcendenceIncomeLevel,
+            transcendenceVolleyLevel = transcendenceVolleyLevel,
+            transcendenceJackpotLevel = transcendenceJackpotLevel,
+            divineIncomeLevel = divineIncomeLevel,
+            divineVolleyLevel = divineVolleyLevel,
+            divineJackpotLevel = divineJackpotLevel,
+            categoryIncomeLevel = categoryLevels[0],
+            categoryTulipLevel = categoryLevels[1],
+            categoryAttackerLevel = categoryLevels[2]
+        };
+        saveSlots[activeSaveSlot] = data;
+        PlayerPrefs.SetString(GetSaveSlotKey(activeSaveSlot), JsonUtility.ToJson(data));
+        PlayerPrefs.Save();
+    }
+
+    private void LoadSaveSlot(int slot)
+    {
+        if (slot < 0 || slot >= saveSlots.Length || saveSlots[slot] == null) return;
+        SaveData data = saveSlots[slot];
+        StopAllCoroutines();
+        ClearActiveBalls();
+        hesoSpinQueue.Clear();
+        pendingBalls = 0;
+        isSpinning = false;
+        isLaunchingBatch = false;
+        gameMode = data.gameMode >= 0 && data.gameMode <= (int)PachinkoMode.KomaChallenge ? (PachinkoMode)data.gameMode : PachinkoMode.Normal;
+        money = ParseSavedInteger(data.money);
+        lifetimePayout = ParseSavedInteger(data.lifetimePayout);
+        runPayout = ParseSavedInteger(data.runPayout);
+        ballValueLevel = Mathf.Max(0, data.ballValueLevel);
+        launchCountLevel = Mathf.Clamp(data.launchCountLevel, 0, 5);
+        hesoExpansionLevel = Mathf.Clamp(data.hesoExpansionLevel > 0 ? data.hesoExpansionLevel : data.launchPowerLevel, 0, 10);
+        EnsureHesoVisual();
+        jackpotLevel = Mathf.Clamp(data.jackpotLevel, 0, 22);
+        probabilityChangeLevel = Mathf.Clamp(data.probabilityChangeLevel, 0, 14);
+        autoLaunchInterval = Mathf.Clamp(data.autoLaunchInterval, 1, 2);
+        autoLaunch = data.autoLaunch;
+        autoPurchase = data.autoPurchase;
+        challengeSpinsRemaining = Mathf.Max(0, data.challengeSpinsRemaining);
+        consecutiveWins = Mathf.Max(0, data.consecutiveWins);
+        reincarnationPoints = Mathf.Max(0, data.reincarnationPoints);
+        transcendencePoints = Mathf.Max(0, data.transcendencePoints);
+        reincarnationUpgradeLevel = Mathf.Max(0, data.reincarnationUpgradeLevel);
+        reincarnationLaunchSpeedLevel = Mathf.Clamp(data.reincarnationLaunchSpeedLevel, 0, 8);
+        jackpotMemoryUpgradeLevel = Mathf.Clamp(data.jackpotMemoryUpgradeLevel, 0, 15);
+        holdCapacityUpgradeLevel = Mathf.Clamp(data.holdCapacityUpgradeLevel, 0, 4);
+        transcendenceIncomeLevel = Mathf.Clamp(data.transcendenceIncomeLevel, 0, 10);
+        transcendenceVolleyLevel = Mathf.Clamp(data.transcendenceVolleyLevel, 0, 3);
+        transcendenceJackpotLevel = Mathf.Clamp(data.transcendenceJackpotLevel, 0, 5);
+        divineIncomeLevel = Mathf.Clamp(data.divineIncomeLevel, 0, 5);
+        divineVolleyLevel = Mathf.Clamp(data.divineVolleyLevel, 0, 5);
+        divineJackpotLevel = Mathf.Clamp(data.divineJackpotLevel, 0, 5);
+        categoryLevels[0] = Mathf.Max(0, data.categoryIncomeLevel);
+        categoryLevels[1] = Mathf.Max(0, data.categoryTulipLevel);
+        categoryLevels[2] = Mathf.Max(0, data.categoryAttackerLevel);
+        lcdDigits[0] = 7; lcdDigits[1] = 7; lcdDigits[2] = 7;
+        lcdMessage = "セーブデータを読み込みました";
+        lastResult = "セーブデータを読み込みました";
+        activeSaveSlot = slot;
+        pendingDeleteSlot = -1;
+        showTitleScreen = false;
+        nextAutoLaunch = Time.time + 0.5f;
+        nextAutoPurchase = Time.time;
+        nextManualLaunch = 0f;
+    }
+
+    private static BigInteger ParseSavedInteger(string value)
+    {
+        return BigInteger.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out BigInteger parsed)
+            ? BigInteger.Max(BigInteger.Zero, parsed) : BigInteger.Zero;
+    }
+
+    private void StartNewGame(int slot)
+    {
+        if (slot < 0 || slot >= saveSlots.Length || saveSlots[slot] != null) return;
+        StopAllCoroutines();
+        ClearActiveBalls();
+        hesoSpinQueue.Clear();
+        pendingBalls = 0;
+        money = lifetimePayout = runPayout = BigInteger.Zero;
+        ballValueLevel = launchCountLevel = hesoExpansionLevel = jackpotLevel = probabilityChangeLevel = 0;
+        EnsureHesoVisual();
+        for (int i = 0; i < categoryLevels.Length; i++) categoryLevels[i] = 0;
+        autoLaunchInterval = 2;
+        autoLaunch = true;
+        autoPurchase = false;
+        gameMode = PachinkoMode.Normal;
+        challengeSpinsRemaining = consecutiveWins = 0;
+        reincarnationPoints = transcendencePoints = 0;
+        reincarnationUpgradeLevel = reincarnationLaunchSpeedLevel = jackpotMemoryUpgradeLevel = holdCapacityUpgradeLevel = 0;
+        transcendenceIncomeLevel = transcendenceVolleyLevel = transcendenceJackpotLevel = 0;
+        divineIncomeLevel = divineVolleyLevel = divineJackpotLevel = 0;
+        isSpinning = isLaunchingBatch = false;
+        lcdStoppedDigits = 0;
+        lcdDigits[0] = 7; lcdDigits[1] = 7; lcdDigits[2] = 7;
+        lcdMessage = "保留を待っています";
+        consecutiveWins = 0;
+        activeSaveSlot = slot;
+        showTitleScreen = false;
+        nextAutoLaunch = Time.time + 0.5f;
+        nextManualLaunch = 0f;
+        lastResult = "ゲームを開始しました";
+        SaveActiveSlot();
+    }
+
+    private void DeleteSaveSlot(int slot)
+    {
+        if (slot < 0 || slot >= saveSlots.Length) return;
+        PlayerPrefs.DeleteKey(GetSaveSlotKey(slot));
+        PlayerPrefs.Save();
+        saveSlots[slot] = null;
+        pendingDeleteSlot = -1;
+    }
+
+    private void ReturnToTitle()
+    {
+        SaveActiveSlot();
+        StopAllCoroutines();
+        if (jackpotCameraShaking && jackpotCamera != null) jackpotCamera.transform.position = jackpotCameraBasePosition;
+        jackpotCameraShaking = false;
+        jackpotCamera = null;
+        shooterAnimating = false;
+        if (shooterPusher != null) shooterPusher.localPosition = new Vector3(0f, -0.44f, 0.02f);
+        ClearActiveBalls();
+        hesoSpinQueue.Clear();
+        pendingBalls = 0;
+        isSpinning = false;
+        isLaunchingBatch = false;
+        jackpotFlashUntil = 0f;
+        activeSaveSlot = -1;
+        showTitleScreen = false;
+        pendingDeleteSlot = -1;
+        SceneManager.LoadScene("TitleScreen");
+    }
+
+    private void OnApplicationPause(bool paused)
+    {
+        if (paused && !showTitleScreen) SaveActiveSlot();
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (!showTitleScreen) SaveActiveSlot();
     }
 
     private void DrawCabinetBackdrop(float width, float height)
@@ -1528,8 +1994,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         GUI.Label(new Rect(detailRect.x + 2f, detailRect.y + 2f, detailRect.width, detailRect.height), streakDetail, detail);
         GUI.Label(detailRect, streakDetail, detail);
         float characterTopLimit = panel.yMax + 8f;
-        float characterHeight = Mathf.Min(290f, screenHeight * 0.43f, Mathf.Max(0f, screenHeight - 82f - characterTopLimit));
-        float characterWidth = Mathf.Min(boardWidth * 0.32f, characterHeight * 0.46f);
+        float characterHeight = Mathf.Min(340f, screenHeight * 0.46f, Mathf.Max(0f, screenHeight - 82f - characterTopLimit));
+        float characterWidth = Mathf.Min(boardWidth * 0.35f, characterHeight * 0.48f);
         float characterX = celebrationCharacterSide == 0 ? boardWidth * 0.035f : boardWidth - characterWidth - boardWidth * 0.035f;
         float characterY = screenHeight - 82f - characterHeight;
         DrawCelebrationCharacter(new Rect(characterX, characterY, characterWidth, characterHeight), pulse);
@@ -1954,12 +2420,32 @@ public sealed class PachinkoGameController : MonoBehaviour
         }
         GUIStyle messageStyle = new GUIStyle(eyebrowStyle)
         {
-            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.09f), 10, 20),
-            alignment = TextAnchor.MiddleCenter,
-            normal = { textColor = Color.white }
+            fontSize = Mathf.Clamp(Mathf.RoundToInt(rect.height * 0.09f), 12, 22),
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleLeft,
+            clipping = TextClipping.Clip,
+            wordWrap = false,
+            normal = { textColor = new Color(0.92f, 0.98f, 1f) }
         };
-        GUI.Label(new Rect(rect.x + 8f, digitY + digitHeight, rect.width - 16f, rect.height * 0.18f),
-            lcdMessage + "　" + holds, messageStyle);
+        float messageY = digitY + digitHeight;
+        float messageHeight = rect.height * 0.21f;
+        float holdsWidth = Mathf.Clamp(rect.width * 0.23f, 68f, 150f);
+        Rect messageRect = new Rect(rect.x + 5f, messageY, rect.width - holdsWidth - 12f, messageHeight);
+        Rect holdsRect = new Rect(messageRect.xMax + 2f, messageY, holdsWidth, messageHeight);
+        float messageTextWidth = messageStyle.CalcSize(new GUIContent(lcdMessage)).x;
+        float availableMessageWidth = Mathf.Max(1f, messageRect.width - 12f);
+        if (messageTextWidth > availableMessageWidth)
+            messageStyle.fontSize = Mathf.Max(10, Mathf.FloorToInt(messageStyle.fontSize * availableMessageWidth / messageTextWidth));
+        GUI.color = new Color(0.008f, 0.025f, 0.07f, 0.98f);
+        GUI.DrawTexture(messageRect, Texture2D.whiteTexture);
+        GUI.DrawTexture(holdsRect, Texture2D.whiteTexture);
+        GUI.color = new Color(0.11f, 0.65f, 0.91f, 0.9f);
+        GUI.DrawTexture(new Rect(messageRect.x, messageRect.y, messageRect.width, 1.5f), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(holdsRect.x, holdsRect.y, holdsRect.width, 1.5f), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+        GUI.Label(new Rect(messageRect.x + 6f, messageRect.y + 1f, messageRect.width - 10f, messageRect.height), lcdMessage, messageStyle);
+        GUIStyle holdsStyle = new GUIStyle(messageStyle) { alignment = TextAnchor.MiddleCenter, fontSize = Mathf.Min(messageStyle.fontSize, 18) };
+        GUI.Label(new Rect(holdsRect.x + 2f, holdsRect.y + 1f, holdsRect.width - 4f, holdsRect.height), holds, holdsStyle);
         GUI.color = oldColor;
     }
 
@@ -1992,21 +2478,76 @@ public sealed class PachinkoGameController : MonoBehaviour
         Camera mainCamera = Camera.main;
         if (mainCamera == null)
         {
-            float fallbackWidth = boardWidth * 0.58f;
-            float fallbackHeight = screenHeight * 0.18f;
+            float fallbackWidth = boardWidth * 0.68f;
+            float fallbackHeight = screenHeight * 0.22f;
             return new Rect((boardWidth - fallbackWidth) * 0.5f, screenHeight * 0.42f, fallbackWidth, fallbackHeight);
         }
 
-        Vector3 lowerLeft = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(-2.4f, -1f, 0.22f)));
-        Vector3 upperRight = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(2.4f, 0.9f, 0.22f)));
+        Vector3 lowerLeft = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(-2.8f, -1.2f, 0.22f)));
+        Vector3 upperRight = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(2.8f, 1.1f, 0.22f)));
         if (lowerLeft.z <= 0f || upperRight.z <= 0f)
         {
-            float fallbackWidth = boardWidth * 0.58f;
-            float fallbackHeight = screenHeight * 0.18f;
+            float fallbackWidth = boardWidth * 0.68f;
+            float fallbackHeight = screenHeight * 0.22f;
             return new Rect((boardWidth - fallbackWidth) * 0.5f, screenHeight * 0.42f, fallbackWidth, fallbackHeight);
         }
 
         return Rect.MinMaxRect(lowerLeft.x, screenHeight - upperRight.y, upperRight.x, screenHeight - lowerLeft.y);
+    }
+
+    private Rect GetHesoLabelRect(float boardWidth, float y, float height)
+    {
+        float fallbackWidth = boardWidth * 0.36f;
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null)
+            return new Rect((boardWidth - fallbackWidth) * 0.5f, y, fallbackWidth, height);
+
+        float halfWidth = 0.54f + hesoExpansionLevel * 0.05f;
+        Vector3 left = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(-halfWidth, -1.45f, 0.18f)));
+        Vector3 right = mainCamera.WorldToScreenPoint(transform.TransformPoint(new Vector3(halfWidth, -1.45f, 0.18f)));
+        if (left.z <= 0f || right.z <= 0f)
+            return new Rect((boardWidth - fallbackWidth) * 0.5f, y, fallbackWidth, height);
+
+        float xMin = Mathf.Min(left.x, right.x);
+        float width = Mathf.Abs(right.x - left.x);
+        return new Rect(xMin, y, width, height);
+    }
+
+    private void DrawPrizeLaneLabels()
+    {
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null) return;
+
+        for (int i = 0; i < laneNames.Length; i++)
+        {
+            float localX = -3f + i;
+            Vector3 worldCenter = transform.TransformPoint(new Vector3(localX, -3.78f, 0.24f));
+            Vector3 worldLeft = transform.TransformPoint(new Vector3(localX - 0.46f, -3.78f, 0.24f));
+            Vector3 worldRight = transform.TransformPoint(new Vector3(localX + 0.46f, -3.78f, 0.24f));
+            Vector3 screenCenter = mainCamera.WorldToScreenPoint(worldCenter);
+            Vector3 screenLeft = mainCamera.WorldToScreenPoint(worldLeft);
+            Vector3 screenRight = mainCamera.WorldToScreenPoint(worldRight);
+            if (screenCenter.z <= 0f || screenLeft.z <= 0f || screenRight.z <= 0f) continue;
+
+            float width = Mathf.Abs(screenRight.x - screenLeft.x);
+            Rect labelRect = new Rect(screenCenter.x - width * 0.5f, Screen.height - screenCenter.y - 13f, width, 26f);
+            Color oldColor = GUI.color;
+            GUI.color = new Color(0.015f, 0.035f, 0.09f, 0.94f);
+            GUI.DrawTexture(labelRect, Texture2D.whiteTexture);
+            GUI.color = PrizeLaneLabelColors[i];
+            GUI.DrawTexture(new Rect(labelRect.x, labelRect.y, labelRect.width, 3f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(labelRect.x, labelRect.yMax - 2f, labelRect.width, 2f), Texture2D.whiteTexture);
+
+            string shortName = PrizeLaneLabels[i];
+            prizeLaneLabelStyle.fontSize = 15;
+            prizeLaneLabelStyle.normal.textColor = PrizeLaneLabelColors[i];
+            float textWidth = prizeLaneLabelStyle.CalcSize(new GUIContent(shortName)).x;
+            if (textWidth > width - 8f)
+                prizeLaneLabelStyle.fontSize = Mathf.Max(9, Mathf.FloorToInt(prizeLaneLabelStyle.fontSize * (width - 8f) / textWidth));
+            GUI.color = Color.white;
+            GUI.Label(new Rect(labelRect.x + 2f, labelRect.y + 2f, labelRect.width - 4f, labelRect.height - 4f), shortName, prizeLaneLabelStyle);
+            GUI.color = oldColor;
+        }
     }
 
     private void DrawHud(Rect rect)
@@ -2066,14 +2607,16 @@ public sealed class PachinkoGameController : MonoBehaviour
     {
         DrawMetalPanel(rect, 3f);
         float inset = Mathf.Clamp(rect.height * 0.14f, 5f, 9f);
-        if (GUI.Button(new Rect(rect.x + inset, rect.y + inset, rect.width * 0.46f, rect.height - inset * 2f), "▶ 発射！", launchButtonStyle))
+        if (GUI.Button(new Rect(rect.x + inset, rect.y + inset, rect.width * 0.39f, rect.height - inset * 2f), "▶ 発射！", launchButtonStyle))
         {
             LaunchBatch();
         }
 
-        GUI.Label(new Rect(rect.x + rect.width * 0.48f, rect.y + inset, rect.width * 0.17f, rect.height - inset * 2f), "玉 ∞", sectionStyle);
-        if (GUI.Button(new Rect(rect.x + rect.width * 0.68f, rect.y + inset, rect.width * 0.30f, rect.height - inset * 2f),
+        GUI.Label(new Rect(rect.x + rect.width * 0.40f, rect.y + inset, rect.width * 0.12f, rect.height - inset * 2f), "玉 ∞", sectionStyle);
+        if (GUI.Button(new Rect(rect.x + rect.width * 0.53f, rect.y + inset, rect.width * 0.27f, rect.height - inset * 2f),
             autoLaunch ? "自動発射 ON　●" : "自動発射 OFF　○", subButtonStyle)) ToggleAutoLaunch();
+        if (GUI.Button(new Rect(rect.x + rect.width * 0.82f, rect.y + inset, rect.width * 0.16f, rect.height - inset * 2f), "タイトル", subButtonStyle))
+            ReturnToTitle();
     }
 
     private void DrawSidePanel(Rect rect)
@@ -2130,7 +2673,7 @@ public sealed class PachinkoGameController : MonoBehaviour
         DrawUpgrade("連射", launchCountLevel, 18, () => launchCountLevel++, "1回の発射で出る玉の数", $"{1 + launchCountLevel} → {2 + launchCountLevel}発", maxLevel: 5);
         DrawUpgrade("入賞口強化", categoryLevels[0], 16, () => categoryLevels[0]++, "入賞口の倍率", $"×{1f + categoryLevels[0] * 0.5f:0.0} → ×{1f + (categoryLevels[0] + 1) * 0.5f:0.0}");
         DrawUpgrade("チューリップ強化", categoryLevels[1], 16, () => categoryLevels[1]++, "チューリップの倍率", $"×{1f + categoryLevels[1] * 0.5f:0.0} → ×{1f + (categoryLevels[1] + 1) * 0.5f:0.0}");
-        DrawUpgrade("ヘソ拡張", launchPowerLevel, 12, () => launchPowerLevel++, "発射パワーを上げて盤面へ届ける", $"Lv.{launchPowerLevel} → Lv.{launchPowerLevel + 1}");
+        DrawUpgrade("ヘソ拡張", hesoExpansionLevel, 12, () => { hesoExpansionLevel++; EnsureHesoVisual(); }, "保留がたまるヘソの入口を広げる", $"入口幅 {1.08f + hesoExpansionLevel * 0.1f:0.00} → {1.18f + hesoExpansionLevel * 0.1f:0.00}", maxLevel: 10);
         DrawUpgrade("大当たり確率", jackpotLevel, 24, () => jackpotLevel++, "液晶抽選の大当たり確率", $"{JackpotChance:P2} → {GetJackpotChance(jackpotLevel + 1):P2}", maxLevel: GetJackpotUpgradeLimit());
         DrawUpgrade("アタッカー倍率", categoryLevels[2], 20, () => categoryLevels[2]++, "アタッカー入賞時の出玉倍率", $"×{1f + categoryLevels[2] * 0.5f:0.0} → ×{1f + (categoryLevels[2] + 1) * 0.5f:0.0}");
         DrawUpgrade("確変突入率", probabilityChangeLevel, 24, () => probabilityChangeLevel++, "大当たり後にRUSHへ入りやすくする", $"{KakuhenChance:P0} → {GetKakuhenChance(probabilityChangeLevel + 1):P0}", maxLevel: GetKakuhenUpgradeLimit());
@@ -2360,7 +2903,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         ConsiderAutoUpgrade("玉の価値", BallValueUpgradeCost(ballValueLevel), () => ballValueLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         if (launchCountLevel < 5)
             ConsiderAutoUpgrade("連射", UpgradeCost(18, launchCountLevel), () => launchCountLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
-        ConsiderAutoUpgrade("発射パワー", UpgradeCost(12, launchPowerLevel), () => launchPowerLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
+        if (hesoExpansionLevel < 10)
+            ConsiderAutoUpgrade("ヘソ拡張", UpgradeCost(12, hesoExpansionLevel), () => { hesoExpansionLevel++; EnsureHesoVisual(); }, ref bestCost, ref bestPurchase, ref bestLabel);
         if (jackpotLevel < 22 && GetJackpotChance(jackpotLevel + 1) > JackpotChance)
             ConsiderAutoUpgrade("大当たり率", UpgradeCost(24, jackpotLevel), () => jackpotLevel++, ref bestCost, ref bestPurchase, ref bestLabel);
         if (probabilityChangeLevel < GetKakuhenUpgradeLimit() && GetKakuhenChance(probabilityChangeLevel + 1) > KakuhenChance)
@@ -2414,7 +2958,8 @@ public sealed class PachinkoGameController : MonoBehaviour
         money = 0;
         ballValueLevel = 0;
         launchCountLevel = 0;
-        launchPowerLevel = 0;
+        hesoExpansionLevel = 0;
+        EnsureHesoVisual();
         jackpotLevel = 0;
         probabilityChangeLevel = 0;
         for (int i = 0; i < categoryLevels.Length; i++)
@@ -2502,7 +3047,15 @@ public sealed class PachinkoGameController : MonoBehaviour
         statLabelStyle = new GUIStyle(bodyStyle) { fontSize = 18 * scale, alignment = TextAnchor.MiddleLeft };
         statValueStyle = new GUIStyle(GUI.skin.label) { fontSize = 22 * scale, fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.76f, 0.18f) } };
         resultStyle = new GUIStyle(GUI.skin.label) { fontSize = 20 * scale, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, wordWrap = true, normal = { textColor = Color.white } };
-        hesoLabelStyle = new GUIStyle(sectionStyle) { alignment = TextAnchor.MiddleCenter, normal = { textColor = new Color(1f, 0.78f, 0.24f) } };
+        hesoLabelStyle = new GUIStyle(sectionStyle) { fontSize = 25 * scale, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, normal = { textColor = new Color(1f, 0.82f, 0.3f) } };
+        prizeLaneLabelStyle = new GUIStyle(sectionStyle)
+        {
+            fontSize = 15,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter,
+            clipping = TextClipping.Clip,
+            wordWrap = false
+        };
         buttonStyle = MakeButtonStyle(new Color(0.035f, 0.19f, 0.43f), new Color(0.07f, 0.42f, 0.8f));
         launchButtonStyle = MakeButtonStyle(new Color(0.025f, 0.34f, 0.82f), new Color(0.03f, 0.58f, 1f));
         launchButtonStyle.fontSize = 30 * scale;
@@ -2514,6 +3067,19 @@ public sealed class PachinkoGameController : MonoBehaviour
             padding = new RectOffset(12, 10, 8, 8),
             margin = new RectOffset(0, 0, 4, 4),
             normal = { background = MakeTexture(new Color(0.025f, 0.07f, 0.16f, 0.99f), new Color(0.91f, 0.58f, 0.16f, 0.96f)) }
+        };
+        saveSlotTitleStyle = new GUIStyle(sectionStyle)
+        {
+            fontSize = 24 * scale,
+            alignment = TextAnchor.MiddleLeft,
+            normal = { textColor = new Color(0.83f, 0.95f, 1f) }
+        };
+        saveSlotInfoStyle = new GUIStyle(bodyStyle)
+        {
+            fontSize = 17 * scale,
+            alignment = TextAnchor.MiddleLeft,
+            wordWrap = true,
+            normal = { textColor = new Color(0.66f, 0.87f, 1f) }
         };
     }
 

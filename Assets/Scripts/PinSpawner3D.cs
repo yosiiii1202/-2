@@ -51,8 +51,10 @@ public class PinSpawner3D : MonoBehaviour
 
                 // Keep a narrow route clear along the left wall so the ball reaches
                 // the top before it meets the upper-left pins on its way back down.
-                float launchLaneX = -3.05f + (y + 3.52f) * 0.03f;
-                if (Mathf.Abs(x - launchLaneX) < 0.52f) continue;
+                float launchLaneProgress = Mathf.InverseLerp(-3.52f, 4.35f, y);
+                float curvedProgress = launchLaneProgress * launchLaneProgress;
+                float launchLaneX = Mathf.Lerp(-3.05f, -1.8f, curvedProgress);
+                if (Mathf.Abs(x - launchLaneX) < 0.64f) continue;
 
                 Vector3 position = new Vector3(x, y, pinZ);
                 GameObject pin = Instantiate(pinPrefab, position, Quaternion.identity, transform);
